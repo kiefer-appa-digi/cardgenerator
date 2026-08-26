@@ -1,26 +1,147 @@
 @import "tailwindcss";
 
+/*
+ * Freedom Trailer Parts — Card Designer
+ *
+ * The chrome is a dark prepress console: a designer stares at an artboard for
+ * hours, and a light UI biases their perception of the artwork sitting on it.
+ * The artboard itself sits on a neutral mid-grey, which is the standard viewing
+ * surround for judging print artwork, and the card's paper is rendered as true
+ * white so the preview never flatters a light design.
+ *
+ * Brand colours come from the supplied identity package:
+ *   Freedom Blue #1D9ED9, Freedom Red #E82627.
+ * Blue is the interactive accent. Red is reserved for destructive actions and
+ * blocking preflight state, so it never competes with it.
+ */
+
+@theme {
+  --color-brand-50:  #eaf7fd;
+  --color-brand-100: #cfeefa;
+  --color-brand-200: #a3ddf5;
+  --color-brand-300: #6ec8ee;
+  --color-brand-400: #3fb1e3;
+  --color-brand-500: #1d9ed9;
+  --color-brand-600: #157fb4;
+  --color-brand-700: #136690;
+  --color-brand-800: #145577;
+  --color-brand-900: #144863;
+
+  --color-flag-50:  #fdeceb;
+  --color-flag-100: #fbd5d4;
+  --color-flag-200: #f8adab;
+  --color-flag-300: #f37b79;
+  --color-flag-400: #ee4c4b;
+  --color-flag-500: #e82627;
+  --color-flag-600: #c81a1b;
+  --color-flag-700: #a41818;
+  --color-flag-800: #871a19;
+  --color-flag-900: #711b1b;
+
+  /* Console surfaces, warm-neutral so the artboard reads cool by contrast. */
+  --color-ink-950: #0b0d0f;
+  --color-ink-900: #101215;
+  --color-ink-850: #16191d;
+  --color-ink-800: #1c2026;
+  --color-ink-750: #23282f;
+  --color-ink-700: #2b3138;
+  --color-ink-600: #3a424b;
+  --color-ink-500: #4e5762;
+  --color-ink-400: #6b7684;
+  --color-ink-300: #939eaa;
+  --color-ink-200: #bcc4cd;
+  --color-ink-100: #dde2e7;
+  --color-ink-50:  #f1f4f6;
+
+  /* Preflight severities. Deliberately distinct in hue AND lightness so the
+     status strip is readable for the ~8% of men with colour vision deficiency. */
+  --color-sev-info: #4fa9e0;
+  --color-sev-warning: #e0a33a;
+  --color-sev-error: #ef6a3c;
+  --color-sev-blocking: #e82627;
+  --color-sev-ok: #3fae72;
+
+  /* The neutral surround the artboard floats on. */
+  --color-canvas: #6e6e6e;
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Archivo", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
+
+  --radius-panel: 0.5rem;
+}
+
+/* Editor fonts are served from /public/fonts — the exact TTFs the PDF embeds.
+   Loading them here is what lets the artboard show the real typeface while the
+   layout maths still comes from the metrics table. */
+@font-face { font-family: "Inter"; src: url("/fonts/Inter-400.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: block; }
+@font-face { font-family: "Inter"; src: url("/fonts/Inter-400Italic.ttf") format("truetype"); font-weight: 400; font-style: italic; font-display: block; }
+@font-face { font-family: "Inter"; src: url("/fonts/Inter-500.ttf") format("truetype"); font-weight: 500; font-style: normal; font-display: block; }
+@font-face { font-family: "Inter"; src: url("/fonts/Inter-600.ttf") format("truetype"); font-weight: 600; font-style: normal; font-display: block; }
+@font-face { font-family: "Inter"; src: url("/fonts/Inter-700.ttf") format("truetype"); font-weight: 700; font-style: normal; font-display: block; }
+@font-face { font-family: "Archivo"; src: url("/fonts/Archivo-400.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: block; }
+@font-face { font-family: "Archivo"; src: url("/fonts/Archivo-600.ttf") format("truetype"); font-weight: 600; font-style: normal; font-display: block; }
+@font-face { font-family: "Archivo"; src: url("/fonts/Archivo-700.ttf") format("truetype"); font-weight: 700; font-style: normal; font-display: block; }
+@font-face { font-family: "Archivo"; src: url("/fonts/Archivo-800.ttf") format("truetype"); font-weight: 800; font-style: normal; font-display: block; }
+@font-face { font-family: "Barlow Condensed"; src: url("/fonts/BarlowCondensed-400.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: block; }
+@font-face { font-family: "Barlow Condensed"; src: url("/fonts/BarlowCondensed-500.ttf") format("truetype"); font-weight: 500; font-style: normal; font-display: block; }
+@font-face { font-family: "Barlow Condensed"; src: url("/fonts/BarlowCondensed-600.ttf") format("truetype"); font-weight: 600; font-style: normal; font-display: block; }
+@font-face { font-family: "Barlow Condensed"; src: url("/fonts/BarlowCondensed-700.ttf") format("truetype"); font-weight: 700; font-style: normal; font-display: block; }
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: dark;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html,
+body {
+  height: 100%;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-ink-900);
+  color: var(--color-ink-100);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+}
+
+/* Tabular figures everywhere a dimension, tint or GTIN is shown, so digits
+   line up column to column and a transposed number is visible at a glance. */
+.numeric {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--color-brand-500) 45%, transparent);
+}
+
+/* Scrollbars that do not shout inside dense panels. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-ink-600) transparent;
+}
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb {
+  background: var(--color-ink-600);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--color-ink-500); background-clip: content-box; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* One visible focus treatment for the whole app. The editor is keyboard-driven
+   (spec §27) so focus must never be invisible. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-brand-400);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }
