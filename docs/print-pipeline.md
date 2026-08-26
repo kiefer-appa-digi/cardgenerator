@@ -37,6 +37,378 @@ export screen can show it without duplicating prose.
 
 ---
 
+## The compliance strings, quoted
+
+These are the exact strings the export screen shows. They are produced by
+`mergeStatus()` and `REMAINING_FOR_PDFX` in `src/lib/pdf/production.ts`; this
+document does not paraphrase them, so the two cannot drift.
+
+`complianceStatus.label`, one of three, depending on what was actually written:
+
+> "CMYK production PDF. No output intent embedded, and not certified PDF/X."
+
+> "CMYK production PDF with an embedded {ICC colour space} output intent
+> ({condition name}). Not certified PDF/X."
+
+> "Proof PDF with non-printing overlay. Not press-ready artwork."
+
+`complianceStatus.remainingForPdfX`, all four entries, verbatim:
+
+1. > "Run the exported file through a PDF/X-4 conversion and verification step
+   > (Ghostscript's pdfwrite with a PDF/X definition, callas pdfToolbox, or an
+   > Acrobat Preflight profile) — pdf-lib writes no XMP and cannot claim
+   > conformance."
+
+2. > "Supply the press's ICC output profile so an OutputIntent can be embedded; a
+   > PDF/X file without one is not conforming."
+
+3. > "Convert or replace placed RGB rasters: this exporter embeds them as-is with
+   > no ICC transform, and PDF/X-4 requires either a calibrated colour space or
+   > the output intent's space."
+
+4. > "Decide the fate of any /Separation (spot) ink: pdf-lib emits only device
+   > spaces, so spots are currently flattened to their CMYK alternate."
+
+And from the type itself, in `src/lib/pdf/production.ts`:
+
+```ts
+/** Permanently false. Nothing in this exporter may set it true. */
+claimsPdfX: false;
+```
+
+It is typed as the literal `false`, not `boolean`. There is no assignment a
+future code path could make that would compile.
+
+---
+
+## Geometry: integer micro-points end to end
+
+Every physical quantity in this system — page size, element frame, corner
+radius, bleed, safe inset, barcode module width, font size, tracking, stroke
+weight, baseline — is an **integer number of micro-points**.
+
+```
+1 PDF point = 1 000 000 µpt
+1 inch      =        72 pt = 72 000 000 µpt
+1 mm        =  72/25.4 pt ≈  2 834 645.669 µpt   (rounded on conversion)
+```
+
+Defined once in `src/lib/units.ts`. Reasons in full in
+`docs/architecture.md`; the two that matter to a printer:
+
+- **µpt → pt is an exact decimal shift.** The exported page geometry is never
+  the result of an irrational scale factor. A micron model would put a `25.4/72`
+  factor on every coordinate that reaches the page.
+- **Integers cannot drift.** Every add and subtract in layout, snapping and
+  export is exact, so a card that has been dragged, nudged, grouped and
+  re-aligned two hundred times is still on exactly the coordinates arithmetic
+  says it should be.
+
+1 µpt = 3.5 × 10⁻⁷ in ≈ 0.35 nm — roughly five orders of magnitude finer than
+any imagesetter. Rounding error cannot reach a physical consequence.
+
+Every one of the supplied five-decimal preset dimensions maps to an exact
+integer with no remainder: 7.11175 in × 72 000 000 = 512 046 000 µpt.
+`tests/unit/units.test.ts` asserts this for all six preset dimensions rather
+than assuming it.
+
+### The single coordinate flip
+
+Card space is **origin at the top-left of the bleed box, +x right, +y down** —
+the same orientation as the screen and as SVG, so the editor needs no transform
+at all. PDF's origin is bottom-left with +y up.
+
+**That flip happens in exactly one place:** `cardSpace()` in
+`src/lib/pdf/draw.ts`, which every drawing operation in both the production and
+the proof writer goes through. There is no second flip anywhere in the codebase
+to get out of sync with it, and no element-level y-negation to forget.
+
+### The pipeline
+
+```
+preset (µpt)                 src/lib/geometry/presets.ts
+  └─ trimRect / bleedRect / safeRect / cavityRect      still µpt
+       └─ planSide()          doc + product → DrawOp[] in bleed space, µpt
+            ├─ Artboard       µpt × zoom → SVG user units        (screen only)
+            ├─ preflight      measures the plan, in µpt
+            └─ PDF writer     cardSpace() → uptToPt() → page coordinates
+```
+
+`uptToPt()` is documented in `src/lib/units.ts` as "the only conversion the PDF
+writer is allowed to use". Emitted coordinates are rounded to 1e-6 pt so a
+rotation matrix cannot vary in its last bit across V8 builds — which is part of
+what makes byte-identical re-export possible.
+
+### Rounded trim corners
+
+`roundedRectPath()` in `src/lib/geometry/types.ts` returns the 0.25 in trim
+corner as an ordered list of line and cubic-Bézier segments (κ = 0.5522847…).
+**The same function** feeds the SVG artboard's trim rule, the proof PDF's trim
+overlay and the production PDF's clipping path, so the corner on screen, the
+corner on the proof and the corner the RIP clips to are the same curve by
+construction, not by agreement.
+
+`clampRadius()` clamps to half the shorter side, which is what both PDF and SVG
+renderers do — so a nonsense radius degrades identically in both.
+
+Containment against a rounded rectangle is a real test, not a bounding-box
+approximation: `roundedRectContains()` does straight-edge containment plus a
+per-corner circle test. Without it, "the barcode is inside the safe area" would
+be wrong in exactly the four places a card gets cut.
+
+### Page boxes
+
+```
+MediaBox = CropBox = BleedBox = the full-bleed canvas, at the origin
+TrimBox                       = the card, inset by the bleed on all four sides
+ArtBox                        = absent
+```
+
+A RIP that honours TrimBox therefore knows where to cut without being told
+separately. The measured values for all three presets are in the table further
+down, verified to ±0.001 pt.
+
+---
+
+## The colour model
+
+**Spec §14 is non-negotiable and this is how it is met.**
+
+### CMYK tints are the source of truth
+
+`PrintColor` (`src/lib/color/types.ts`) is a discriminated union:
+
+| Space | Shape | Notes |
+| --- | --- | --- |
+| `cmyk` | `{ c, m, y, k }` | tints in **tenths of a percent**, 0…1000 |
+| `gray` | `{ k }` | ink coverage; 1000 = solid |
+| `spot` | `{ name, alternate: cmyk, tint }` | a CMYK alternate is **required**, not optional |
+| `none` | `{}` | paints nothing; distinct from 0 % ink |
+
+Tints are stored in tenths of a percent so "38.5 %" round-trips exactly. There
+is no float anywhere in a colour value, so an ink recipe cannot drift, and
+`C0 M0 Y0 K100` cannot become `K99.9997` through a save cycle.
+
+**No RGB value is ever stored as print data.** The database columns that hold
+colour (`design_elements.colors`, `brands.swatches`, the document's element
+records) hold `PrintColor` objects. There is no hex string in the print path.
+
+### RGB exists in exactly one direction, for exactly one purpose
+
+`cmykToPreviewRgb()` converts CMYK to sRGB **for the browser, which cannot show
+CMYK**. It is the naive multiplicative model, deliberately:
+
+```
+r = 255 · (1 − min(1, c·(1−k) + k))     …and the same for g and b
+```
+
+It is fast, stable, and — the point — **honest about what it is**. It is not an
+ICC transform and the UI never labels its output as a colour-accurate proof.
+The conversion is one-way in the render path: nothing reads a pixel back off the
+screen and calls it ink.
+
+The reverse direction exists only for *imported* values — a hex swatch a user
+pastes, a colour picked out of an uploaded RGB asset. `rgbToCmykEstimate()` uses
+simple GCR, and the module comment requires every call site to raise a preflight
+warning, because a converted RGB value is an estimate and not a specified ink
+recipe.
+
+**Consequence for the brand swatches, stated plainly.** Freedom Blue and Freedom
+Red are specified in the identity package as sRGB (`#1D9ED9`, `#E82627`). The
+shipped CMYK builds (78/20/0/0 and 0/90/88/0) are *derived* from those, and both
+carry `derivedFromRgb: true` with the source hex. **They will not match a press
+without vendor-supplied ink values.** See `docs/source-audit.md` D19 and A14.
+
+### What reaches the PDF
+
+`src/lib/pdf/color.ts` is the only module that turns a `PrintColor` into pdf-lib
+components, and it **never calls `rgb()`**. Verified structurally rather than by
+inspection: `tests/unit/pdf.test.ts` asserts that for an all-CMYK card every
+page contains `k`/`K` operators and **zero** `rg`/`RG` operators.
+
+Grayscale defaults to DeviceCMYK `0/0/0/K` rather than DeviceGray. Both are
+legal, but a RIP is free to re-separate DeviceGray across all four plates, which
+would silently turn a K-only back into a four-colour job. Writing `0/0/0/K` says
+exactly what the press should do. A deployment whose RIP is configured the other
+way passes `grayPolicy: "device-gray"`.
+
+Spot inks convert to their CMYK alternate and raise a `SPOT_CONVERTED` info note
+naming the ink, its tint and the exact build that was written — because pdf-lib
+cannot emit a `/Separation` space. The architecture supports spots; the current
+writer cannot produce a spot plate, and it says so on every export that has one.
+
+**A CMYK number is not colour management.** Without an output intent those
+numbers have no defined appearance. That is why `OUTPUT_INTENT_MISSING` is a
+warning on every export until a deployment supplies a real profile.
+
+---
+
+## Black rules
+
+§14 asks for configurable production rules. They live in `BlackRulesSchema`
+(`src/lib/color/types.ts`) and are stored per organisation in
+`organizations.settings`, because a different press means different numbers, not
+a different build.
+
+| Rule | Default | What it does |
+| --- | --- | --- |
+| `textBlack` | `0/0/0/100` | The production standard for body copy. Single-plate, so small type cannot go out of register. |
+| `richBlack` | `60/40/40/100` | The build for large solid black areas, where 100K alone reads brown. Configurable — every printer has an opinion. |
+| `totalAreaCoverageLimit` | `3000` (= 300.0 %) | Total ink limit. A common sheetfed coated limit; a web or uncoated job wants less. |
+| `richBlackMinTextSize` | `14 000 000 µpt` (= 14 pt) | Below this size, rich black is a registration risk and is flagged. |
+
+`totalAreaCoverage()` sums the four tints of the *effective* CMYK, so it
+correctly measures a spot at 60 % tint and a gray, not just a literal CMYK
+value.
+
+Four preflight checks enforce them (`src/lib/preflight/checks/color.ts`):
+
+- **`INK_LIMIT_EXCEEDED`** — a recipe over the limit. Asserted by
+  `tests/unit/preflight.test.ts` ("flags a recipe over the ink limit"), and the
+  organisation's limit is honoured when it is tighter than the profile's
+  ("enforces the organisation's total ink limit when it is tighter than the
+  profile's").
+- **`RICH_BLACK_SMALL_TEXT`** — rich black on type under the threshold ("flags
+  small type set in rich black"). The stricter of the profile and the
+  organisation threshold wins.
+- **`GRAYSCALE_BACK_VIOLATION`** — colour ink on a standard back. §7 requires the
+  standard back template to flag non-grayscale content, and §7 equally requires
+  that an authorised template be allowed to use colour: the check softens when
+  the template permits it ("flags colour ink on a grayscale back and softens it
+  when the template allows colour"). `isGrayscale()` is the test, and it treats
+  `gray`, `none` and a CMYK value with `c = m = y = 0` as grayscale.
+- **`OUTPUT_INTENT_MISSING`** — said once per export, honestly, and silent when
+  the deployment supplies a profile.
+
+**What is not done:** the exporter sets no `/OP`, `/op` or `/OPM`. Overprint —
+including the usual "small black text overprints" rule — is left to the RIP's
+defaults. That is a real gap for a job that depends on it, and it is listed
+below under *Other gaps worth stating* rather than glossed.
+
+---
+
+## The barcode pipeline
+
+Barcodes are production-critical (§12) and are **vector from end to end**. There
+is no rasterisation step and no image XObject: `renderBarcode()`
+(`src/lib/barcode/index.ts`) returns a `BarcodeRender` — a list of `BarModule`
+rectangles in µpt plus human-readable text runs plus the four quiet zones — and
+both the SVG artboard and the PDF writer draw those same rectangles.
+
+| Symbology | Module | Status |
+| --- | --- | --- |
+| UPC-A | `upc.ts` | full encodation, guard extensions, HRI placement |
+| EAN-13 | `upc.ts` | full, including first-digit-outside-guard placement |
+| GS1-128 | `code128.ts` | AI parsing, subset switching, FNC1 separators |
+| QR / GS1 Digital Link | `qr.ts` | matrix from `qrcode`, drawn as vector modules |
+
+### Dimensions, and why they are what they are
+
+| Constant | Value | Source |
+| --- | --- | --- |
+| `NOMINAL_X_UPT` | 936 000 µpt = **0.013 in** | GS1 nominal X-dimension for UPC-A/EAN-13 |
+| `NOMINAL_UPCA_BAR_HEIGHT_UPT` | 73 440 000 µpt = **1.02 in** | GS1 nominal bar height |
+| `MIN_MAGNIFICATION_BPS` / `MAX_MAGNIFICATION_BPS` | 8 000 / 20 000 = **80 % – 200 %** | the GS1 magnification range |
+| `UPCA_QUIET_LEFT_X` / `UPCA_QUIET_RIGHT_X` | 9 X / 9 X | GS1 UPC-A light margins |
+| `EAN13_QUIET_LEFT_X` / `EAN13_QUIET_RIGHT_X` | 11 X / 7 X | GS1 EAN-13 light margins |
+| `CODE128_QUIET_X` | 10 X | GS1-128 light margin |
+| `NOMINAL_X_CODE128_UPT` | 1 403 150 µpt = **0.495 mm** | GS1 General Specifications |
+| `NOMINAL_X_QR_UPT` | 1 743 307 µpt = **0.615 mm** | GS1 Digital Link QR nominal |
+| `QR_MIN_/QR_MAX_MAGNIFICATION_BPS` | 6 450 / 16 090 | X = 0.3967 mm … 0.9896 mm |
+| `QR_QUIET_MODULES` | 4 | QR quiet zone |
+| `QR_ERROR_CORRECTION` | `M` | GS1 Digital Link recommendation |
+
+A UPC-A at 100 % magnification is **1.469 in wide including quiet zones**, and
+`tests/unit/barcode.test.ts` asserts exactly that number.
+
+### The rules the engine enforces
+
+- **Check digits are validated, never repaired into a different number.** A bad
+  check digit is a `BAD_CHECK_DIGIT` error naming the digit it should have been;
+  an 11-digit UPC body is accepted with an explicit "the check digit was
+  appended" note, so a caller can never mistake one for the other.
+- **Magnification scales X strictly.** There is no independent width parameter,
+  so §12's "prevent arbitrary horizontal distortion" is structural — a caller
+  cannot express a stretched symbol. A requested magnification outside 80–200 %
+  is **clamped and reported**, not silently accepted.
+- **Quiet zones are part of the symbol box,** so a bar module's `x` is measured
+  from the quiet-zone-inclusive left edge. An element frame that fits the symbol
+  therefore fits its light margins too.
+- **Bar height below nominal renders, with a note.** Truncating a symbol is
+  sometimes a deliberate packaging decision; doing it silently is not.
+- **An unencodable value paints nothing.** `drawSidePlan()` records a
+  `barcodeErrors` entry and the export raises a **blocking**
+  `BARCODE_VALUE_INVALID` finding. §32's "never fake" applied to barcodes: a
+  symbol made of `undefined` is worse than no symbol.
+- **GS1-128 refuses AI data outside GS1 encodable character set 82,** and
+  refuses more than 48 data characters.
+
+### What preflight adds on top
+
+`src/lib/preflight/checks/barcode.ts` measures the *placed* symbol on the
+*planned* card:
+
+`GTIN_INVALID` · `BARCODE_VALUE_INVALID` · `BARCODE_QUIET_ZONE` ·
+`BARCODE_SIZE` · `BARCODE_MAGNIFICATION` · `BARCODE_CONTRAST` ·
+`BARCODE_CLIPPED` · `SAFE_AREA_BARCODE` · cavity conflict.
+
+The quiet-zone check is measured **from the bars, not from the symbol box** — a
+caption sitting in the human-readable band is not an intrusion, and a block
+painted over the bars is. That distinction has its own regression suite in
+`tests/unit/preflight.test.ts` (`describe("barcode quiet zone is measured from
+the bars, not the whole symbol box")`).
+
+The contrast check is honest about its own limits: it reports the ink
+difference between bar colour and background as an **ink proxy**, not a measured
+optical density, and says so in the finding text. A real verification is a
+verifier on a printed sample, not arithmetic on a PDF.
+
+### In the PDF
+
+Each bar module is one filled rectangle in DeviceCMYK. `tests/unit/pdf.test.ts`
+("draws bar modules as filled rectangles, one per module") counts them, and
+`tests/unit/pdf-validate.test.ts` recovers the digits back out of the finished
+file through the `/ToUnicode` CMap **in reading order, not paint order**, and
+independently counts bar-shaped filled rectangles. Known-answer fixtures for
+UPC-A `036000291452` compare the encoding module for module against the
+published tables, in both directions.
+
+---
+
+## The font pipeline, end to end
+
+The embedding and subsetting mechanics are below under
+[Font embedding and subsetting](#font-embedding-and-subsetting). The parts
+either side of that:
+
+**Only shipped fonts can be used.** `src/lib/text/fonts.ts` registers three
+families — Inter (5 faces), Archivo (4), Barlow Condensed (4) — all **SIL Open
+Font Licence 1.1**, which permits embedding and redistribution
+(`src/assets/fonts/OFL.txt`). §9 requires that fonts used for export be legally
+available and embeddable; restricting the picker to fonts the application ships
+is how that is guaranteed rather than hoped for.
+
+**Metrics come from the same bytes pdf-lib embeds.**
+`scripts/gen-font-metrics.ts` reads the shipped TTFs with the same
+`@pdf-lib/fontkit` build and writes `src/lib/text/metrics.json`. The layout
+engine measures from that file; pdf-lib subsets and embeds those same TTFs.
+There is no second font source and no browser measurement anywhere in the path.
+
+**An unknown family is a reported substitution, never a silent one.**
+`getFaceMetrics()` falls back to Inter 400 and returns `missing: true`; the plan
+records it; preflight raises `FONT_MISSING`; and the exporter raises its own
+`FONT_MISSING` finding at **error** severity saying "the layout engine
+substituted a shipped face and the PDF was set in that substitute — the copy
+will not look as designed". §9's "add preflight errors for missing fonts",
+answered in both engines.
+
+**Characters outside the metrics are flagged, not guessed.** The generated
+metrics cover Latin-1 plus common typographic punctuation. Anything else falls
+back to the space advance and trips the layout engine's `unmappedGlyphs` flag,
+which preflight reports — rather than laying out silently wrong.
+
+---
+
 ## What pdf-lib CAN guarantee
 
 ### DeviceCMYK colour operators
@@ -85,12 +457,25 @@ The complete two-page production file with no placed raster is **25 187 bytes**.
 
 Two things `src/lib/pdf/fonts.ts` has to add on top of what pdf-lib does:
 
-1. **Subset tags.** pdf-lib writes `/BaseFont /Inter-SemiBold-9742` for a subset.
-   ISO 32000 and every part of PDF/X require a subset font name to carry a
-   six-uppercase-letter tag and a `+`. `finaliseFontSubsets()` rewrites the name
-   to `ABCDEF+Inter-SemiBold` on the Type0 font, the descendant CIDFont and the
-   FontDescriptor, after `doc.flush()` has materialised the dictionaries. The tag
-   is derived deterministically from the face key.
+1. **Subset tags, unique per subset.** pdf-lib writes
+   `/BaseFont /Inter-SemiBold-9742` for a subset. ISO 32000-1 §9.6.4 and every
+   part of PDF/X require a subset font name to carry a six-uppercase-letter tag
+   and a `+`, and require *different subsets to carry different tags*.
+   `finaliseFontSubsets()` rewrites the name to `ABCDEF+Inter-SemiBold` on the
+   Type0 font, the descendant CIDFont and the FontDescriptor, after `doc.flush()`
+   has materialised the dictionaries — and the FontFile2 program the tag is
+   derived from.
+
+   The tag is a hash of the face key **and the embedded program**, not of the face
+   key alone. `PDFContext`'s RNG is seeded, so two cards that use the same
+   families embed the same faces in the same sorted order and both receive the
+   identical pdf-lib suffix `-9742`; a face-keyed tag would then give two files
+   holding *different* glyph sets the identical `/DOGXPG+Inter-SemiBold-9742`.
+   Imposition and merge tools de-duplicate fonts by name, so imposing two such
+   cards on one press sheet drops glyphs from one of them. Content-addressing the
+   tag keeps the export byte-reproducible — identical subsets share a tag — while
+   making that collision impossible. Guarded by "two cards with different copy do
+   not share a /BaseFont" in `tests/unit/pdf.test.ts`.
 
 2. **Shaping must be switched off.** pdf-lib encodes strings through fontkit's
    `layout()`, which applies the font's default OpenType features. The shared

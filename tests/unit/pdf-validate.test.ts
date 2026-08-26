@@ -71,8 +71,8 @@ type FixtureOptions = {
   imageAssetId?: string;
   /** Placed size of the image, inches. */
   imageSizeIn?: number;
-  /** Placed size of the image, inches, when it is not square. */
-  imageFrameIn?: { w: number; h: number };
+  /** Place the image as a full-bleed background covering the whole canvas. */
+  imageFullBleed?: boolean;
   imageFit?: "fill" | "fit" | "crop" | "stretch";
   overlayText?: string;
 };
@@ -122,17 +122,18 @@ function fixtureDoc(presetCode: PresetCode, opts: FixtureOptions = {}): DesignDo
 
   if (opts.imageAssetId) {
     const size = IN(opts.imageSizeIn ?? 1);
-    const frame = opts.imageFrameIn
-      ? { w: IN(opts.imageFrameIn.w), h: IN(opts.imageFrameIn.h) }
-      : { w: size, h: size };
+    const frame = opts.imageFullBleed
+      ? { x: 0, y: 0, w, h }
+      : { x: IN(0.4), y: IN(2), w: size, h: size };
     front.push(
       el({
         kind: "image",
         id: "photo",
         name: "Photo",
-        frame: { x: IN(0.4), y: IN(2), w: frame.w, h: frame.h },
+        frame,
         assetId: opts.imageAssetId,
         fit: opts.imageFit ?? "stretch",
+        ...(opts.imageFullBleed ? { isBackground: true } : {}),
       }),
     );
   }
@@ -809,5 +810,383 @@ describe("report rendering", () => {
     const text = formatValidationReport(report);
     expect(text).toContain("[FAIL] Page count");
     expect(text).toContain("result          FAIL");
+  });
+});
+
+/* ------------------------------------------------------------- regressions */
+
+/**
+ * Faults that a correct-looking file can carry through every measurement the
+ * first version of this validator made. Each one was found by exporting a real
+ * card, breaking exactly one property, and watching the report say PASS.
+ */
+describe("faults that survive a box-only check", () => {
+  let good: Exported;
+  beforeAll(async () => {
+    good = await exportFixture("409TF");
+  });
+
+  it("PAGE_ORIENTATION fails when /Rotate turns the card upside down", async () => {
+    const broken = await mutate(good.bytes, (doc) => {
+      for (const p of doc.getPages()) p.node.set(PDFName.of("Rotate"), PDFNumber.of(180));
+    });
+    const report = await validateFixture(good, {}, broken);
+    const c = check(report, "PAGE_ORIENTATION");
+    expect(c.status).toBe("fail");
+    expect(c.detail).toContain("upside down");
+    expect(c.measurements.rotations).toBe("180, 180");
+    // Every box still measures correctly, which is the point.
+    expect(check(report, "PAGE_BOXES").status).toBe("pass");
+    expect(report.passed).toBe(false);
+  });
+
+  it("/Rotate 90 is also caught as the wrong physical size", async () => {
+    const broken = await mutate(good.bytes, (doc) => {
+      for (const p of doc.getPages()) p.node.set(PDFName.of("Rotate"), PDFNumber.of(90));
+    });
+    const report = await validateFixture(good, {}, broken);
+    expect(check(report, "PAGE_ORIENTATION").status).toBe("fail");
+    const dims = check(report, "PHYSICAL_DIMENSIONS");
+    expect(dims.status).toBe("fail");
+    // The imaged sheet is the card turned on its side.
+    expect(dims.measured).toBe("7.36175 × 4.61750 in");
+  });
+
+  it("PAGE_ORIENTATION fails when the page content is y-flipped", async () => {
+    const broken = await mutate(good.bytes, (doc) => {
+      const page = doc.getPages()[0];
+      const h = page.getMediaBox().height;
+      page.node.wrapContentStreams(
+        doc.context.register(doc.context.flateStream(`1 0 0 -1 0 ${h} cm\n`)),
+        doc.context.register(doc.context.flateStream("")),
+      );
+    });
+    const report = await validateFixture(good, {}, broken);
+    const c = check(report, "PAGE_ORIENTATION");
+    expect(c.status).toBe("fail");
+    expect(c.detail).toContain("mirrored");
+    expect(Number(c.measurements.mirroredMarks)).toBeGreaterThan(0);
+    expect(c.pageResults[0].status).toBe("fail");
+    expect(c.pageResults[1].status).toBe("pass");
+    // Boxes, colour and text are all still perfect on the flipped page.
+    expect(check(report, "PAGE_BOXES").status).toBe("pass");
+    expect(check(report, "COLOR_SPACES").status).toBe("pass");
+  });
+
+  it("a good export is upright and unmirrored", async () => {
+    const report = await validateFixture(good);
+    const c = check(report, "PAGE_ORIENTATION");
+    expect(c.status).toBe("pass");
+    expect(c.measurements.mirroredMarks).toBe(0);
+    expect(c.measurements.rotations).toBe("0, 0");
+  });
+
+  it("NO_EDITOR_OVERLAYS fails on a printable annotation over the artwork", async () => {
+    const broken = await mutate(good.bytes, async (doc) => {
+      const page = doc.getPages()[0];
+      const helv = await doc.embedFont(StandardFonts.Helvetica);
+      const ap = doc.context.flateStream(
+        "q 2 w 0 0 220 60 re S BT /F1 14 Tf 12 20 Td (DIELINE GUIDE) Tj ET Q",
+        {
+          Type: "XObject",
+          Subtype: "Form",
+          BBox: [0, 0, 220, 60],
+          Resources: { Font: { F1: helv.ref } },
+        },
+      );
+      const annot = doc.context.obj({
+        Type: "Annot",
+        Subtype: "Square",
+        Rect: [40, 40, 260, 100],
+        F: 4, // Print
+        Contents: PDFString.of("check the die"),
+        AP: { N: doc.context.register(ap) },
+      });
+      page.node.set(PDFName.of("Annots"), doc.context.obj([doc.context.register(annot)]));
+    });
+    const report = await validateFixture(good, {}, broken);
+    const c = check(report, "NO_EDITOR_OVERLAYS");
+    expect(c.status).toBe("fail");
+    expect(c.measurements.printableAnnotations).toBe(1);
+    expect(c.detail).toContain("printable annotation");
+    expect(report.inspection.pages[0].annotations[0].appearanceText).toContain("DIELINE GUIDE");
+  });
+
+  it("finds overlay words written into an annotation's appearance stream", async () => {
+    const broken = await mutate(good.bytes, async (doc) => {
+      const page = doc.getPages()[0];
+      const helv = await doc.embedFont(StandardFonts.Helvetica);
+      const ap = doc.context.flateStream("BT /F1 9 Tf 2 2 Td (TRIM LINE) Tj ET", {
+        Type: "XObject",
+        Subtype: "Form",
+        BBox: [0, 0, 90, 14],
+        Resources: { Font: { F1: helv.ref } },
+      });
+      const annot = doc.context.obj({
+        Type: "Annot",
+        Subtype: "FreeText",
+        Rect: [20, 20, 110, 34],
+        F: 4,
+        AP: { N: doc.context.register(ap) },
+      });
+      page.node.set(PDFName.of("Annots"), doc.context.obj([doc.context.register(annot)]));
+    });
+    const report = await validateFixture(good, {}, broken);
+    const c = check(report, "NO_EDITOR_OVERLAYS");
+    expect(c.status).toBe("fail");
+    expect(c.measured).toContain('"TRIM"');
+  });
+
+  it("an unreadable content stream fails instead of passing by default", async () => {
+    const broken = await mutate(good.bytes, (doc) => {
+      const page = doc.getPages()[0];
+      const cs = doc.context.flateStream("q Q\n");
+      cs.dict.set(PDFName.of("Filter"), PDFName.of("JBIG2Decode"));
+      page.node.set(PDFName.of("Contents"), doc.context.obj([doc.context.register(cs)]));
+    });
+    const report = await validateFixture(good, {}, broken);
+    expect(report.inspection.pages[0].contentReadable).toBe(false);
+    for (const id of [
+      "NO_EDITOR_OVERLAYS",
+      "NO_CLIPPING",
+      "COLOR_SPACES",
+      "IMAGE_RESOLUTION",
+    ] as const) {
+      const c = check(report, id);
+      expect(c.status, id).toBe("fail");
+      expect(c.pageResults[0].detail, id).toContain("could not be decompressed");
+    }
+    expect(report.passed).toBe(false);
+    expect(report.warnings.join(" ")).toContain("could not decode");
+  });
+
+  it("COLOR_SPACES sees RGB hiding behind an Indexed palette", async () => {
+    const broken = await mutate(good.bytes, (doc) => {
+      const page = doc.getPages()[0];
+      const img = doc.context.flateStream(Uint8Array.from([0, 1, 1, 0]), {
+        Type: "XObject",
+        Subtype: "Image",
+        Width: 2,
+        Height: 2,
+        BitsPerComponent: 8,
+        ColorSpace: [
+          "Indexed",
+          "DeviceRGB",
+          1,
+          PDFString.of(String.fromCharCode(255, 0, 0, 0, 0, 255)),
+        ],
+      });
+      page.node.normalize();
+      page.node
+        .Resources()!
+        .lookup(PDFName.of("XObject"), PDFDict)
+        .set(PDFName.of("Idx"), doc.context.register(img));
+      const cs = doc.context.register(
+        doc.context.flateStream("q 40 0 0 40 20 20 cm /Idx Do Q\n"),
+      );
+      (page.node.Contents() as PDFArray).push(cs);
+    });
+    const report = await validateFixture(good, {}, broken);
+    const c = check(report, "COLOR_SPACES");
+    expect(c.status).toBe("fail");
+    expect(c.measurements.rgbSpaces).toBe("Indexed-DeviceRGB");
+  });
+
+  it("inspectPdf reports a malformed page box instead of throwing", async () => {
+    const broken = await mutate(good.bytes, (doc) => {
+      doc
+        .getPages()[0]
+        .node.set(PDFName.of("MediaBox"), doc.context.obj([0, 0, 332.46, null]));
+    });
+    const insp = await inspectPdf(broken);
+    expect(insp.pages[0].boxes.mediaBox).toBeNull();
+    expect(insp.warnings.join(" ")).toContain("MediaBox entry 3 is not a number");
+
+    // And the validator turns that into a FAIL, not an exception.
+    const report = await validateFixture(good, {}, broken);
+    expect(report.passed).toBe(false);
+    expect(check(report, "PHYSICAL_DIMENSIONS").pageResults[0].measured).toBe("no MediaBox");
+  });
+});
+
+describe("crops are not clipping", () => {
+  /**
+   * `fit: "fill"` is the default for every image element and is how a designer
+   * drops a photo into a background frame. The writer places the whole raster on
+   * an enlarged rect and clips it to the frame — the only way to express a crop
+   * in PDF — so the raw `Do` coordinates run far outside the page. Measuring
+   * those instead of the visible window condemned every card with a cropped
+   * background photo.
+   */
+  for (const fit of ["fill", "crop", "fit", "stretch"] as const) {
+    it(`passes NO_CLIPPING for a background image with fit "${fit}"`, async () => {
+      const exported = await exportFixture("409TF", {
+        imageAssetId: "wide",
+        imageFit: fit,
+        imageFullBleed: true,
+        // A 4:1 source into a 0.63:1 frame, so "fill"/"crop" must crop hard and
+        // the writer places the whole raster far outside the page.
+        imagePixels: 4000,
+        imagePixelsTall: 1000,
+      });
+      const report = await validateFixture(exported);
+      const c = check(report, "NO_CLIPPING");
+      expect(c.status, c.pageResults[0]?.detail).toBe("pass");
+      expect(Number(c.measurements.worstOverhangPt)).toBeLessThanOrEqual(
+        Number(c.measurements.tolerancePt),
+      );
+    });
+  }
+
+  it("still fails when an IMAGE element is dragged off the artboard", async () => {
+    // The image carries its own crop clip, so this is the case where the crop
+    // is honoured and the mark is *still* over the page edge.
+    const preset = CARD_PRESETS["409TF"];
+    const w = fullBleedWidth(preset);
+    const doc = fixtureDoc("409TF");
+    const px = 900;
+    const jpeg = await grayJpeg(px);
+    doc.front.elements.push(
+      el({
+        kind: "image",
+        id: "dragged",
+        name: "dragged off",
+        frame: { x: w - IN(0.5), y: IN(2), w: IN(2), h: IN(2) },
+        assetId: "dragged-asset",
+        fit: "fill",
+      }),
+    );
+    const assets = new Map<string, AssetInfo>([
+      [
+        "dragged-asset",
+        {
+          id: "dragged-asset",
+          pixelWidth: px,
+          pixelHeight: px,
+          colorSpace: "gray",
+          contentType: "image/jpeg",
+        },
+      ],
+    ]);
+    const plans = planDocument({ doc, product: emptyProductContext(), assets });
+    const out = await renderProductionPdf({
+      plans,
+      assetBytes: async () => ({ bytes: jpeg, contentType: "image/jpeg" }),
+    });
+    const report = await validateProductionPdf(
+      out.bytes,
+      expectationForPlans({ presetCode: "409TF", plans }),
+    );
+    const c = check(report, "NO_CLIPPING");
+    expect(c.status).toBe("fail");
+    expect(Number(c.measurements.worstOverhangPt)).toBeCloseTo(uptToPt(IN(1.5)), 3);
+  });
+
+  it("still fails when an element really is dragged off the artboard", async () => {
+    const preset = CARD_PRESETS["409TF"];
+    const w = fullBleedWidth(preset);
+    const doc = fixtureDoc("409TF");
+    doc.front.elements.push(
+      el({
+        kind: "shape",
+        id: "runoff",
+        name: "off the artboard",
+        shape: "rect",
+        frame: { x: w - IN(0.5), y: IN(2), w: IN(2), h: IN(1) },
+        fill: cmykPct(0, 90, 88, 0),
+        stroke: NONE,
+      }),
+    );
+    const plans = planDocument({ doc, product: emptyProductContext(), assets: new Map() });
+    const out = await renderProductionPdf({ plans });
+    const report = await validateProductionPdf(
+      out.bytes,
+      expectationForPlans({ presetCode: "409TF", plans }),
+    );
+    expect(check(report, "NO_CLIPPING").status).toBe("fail");
+  });
+});
+
+describe("text is read the way a reader reads it", () => {
+  it("does not invent a word break between two abutting runs", async () => {
+    const preset = CARD_PRESETS["409TF"];
+    const w = fullBleedWidth(preset);
+    const doc = emptyDesign("409TF");
+    doc.front.elements = [
+      el({
+        kind: "text",
+        id: "t",
+        name: "styled word",
+        frame: { x: IN(0.4), y: IN(0.5), w: w - IN(0.8), h: IN(0.6) },
+        // One word, two runs, because the second half is bold. Joining runs with
+        // a space would spell "TRIM MER" and trip the overlay search.
+        paragraphs: [{ runs: [{ text: "TRIM" }, { text: "MER", bold: true }] }],
+        fontFamily: "Inter",
+        fontWeight: 400,
+        fontSize: 14_000_000,
+        color: TEXT_BLACK,
+      }),
+    ];
+    doc.back.elements = [];
+    const plans = planDocument({ doc, product: emptyProductContext(), assets: new Map() });
+    const out = await renderProductionPdf({ plans });
+    const insp = await inspectPdf(out.bytes);
+    expect(insp.pages[0].textRuns.length).toBeGreaterThan(1);
+    expect(insp.pages[0].textContent).toBe("TRIMMER");
+
+    const report = await validateProductionPdf(
+      out.bytes,
+      expectationForPlans({ presetCode: "409TF", plans }),
+    );
+    expect(check(report, "NO_EDITOR_OVERLAYS").status).toBe("pass");
+  });
+
+  it("still separates runs that the pen actually jumped between", async () => {
+    const insp = await inspectPdf((await exportFixture("409TF")).bytes);
+    // The UPC-A human-readable line is four runs with real gaps between them.
+    const line = insp.pages[0].textLines.find((l) => l.replace(/[^0-9]/g, "").includes(UPC));
+    expect(line).toBeDefined();
+    expect(line).toContain(" ");
+  });
+
+  it("BARCODE_PRESENCE will not accept digits spelled across two lines", async () => {
+    const preset = CARD_PRESETS["409TF"];
+    const w = fullBleedWidth(preset);
+    const doc = fixtureDoc("409TF", { withBarcode: false });
+    // Bars, so the vector half of the check is satisfied, plus the GTIN split
+    // over two unrelated lines the way a part number and a lot code would be.
+    doc.front.elements.push(
+      el({
+        kind: "barcode",
+        id: "other",
+        name: "different symbol",
+        frame: { x: IN(0.4), y: IN(4), w: IN(1.6), h: IN(1.2) },
+        symbology: "upca",
+        value: "012345678905",
+        quietZoneFill: cmykPct(0, 0, 0, 0),
+      }),
+      el({
+        kind: "text",
+        id: "split",
+        name: "split digits",
+        frame: { x: IN(0.4), y: IN(3), w: w - IN(0.8), h: IN(0.6) },
+        paragraphs: [{ runs: [{ text: "036000" }] }, { runs: [{ text: "291452" }] }],
+        fontFamily: "Inter",
+        fontWeight: 400,
+        fontSize: 9_000_000,
+        color: TEXT_BLACK,
+      }),
+    );
+    const plans = planDocument({ doc, product: emptyProductContext(), assets: new Map() });
+    const out = await renderProductionPdf({ plans });
+    const report = await validateProductionPdf(
+      out.bytes,
+      expectationForPreset("409TF", {
+        barcodes: [{ value: UPC, humanReadable: true, page: 1 }],
+      }),
+    );
+    const c = check(report, "BARCODE_PRESENCE");
+    expect(c.status).toBe("fail");
+    expect(c.detail).toContain(UPC);
   });
 });

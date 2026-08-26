@@ -4,15 +4,16 @@ import { and, eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { revalidatePath } from "next/cache";
 import { createHash } from "node:crypto";
-import { db, imports, productIdentifiers, products, brands } from "@/server/db";
+import { db, imports } from "@/server/db";
 import { assertSameOrg, requireCapability } from "@/server/auth/current";
 import { audit } from "@/server/audit";
 import { inspectWorkbook, parseWorkbook, readParsedSheetRows } from "@/lib/import/inspect";
 import { suggestMapping } from "@/lib/import/mapping";
 import { buildPreview } from "@/lib/import/preview";
 import { planImport } from "@/lib/import/commit";
-import { SheetMappingSchema, type ExistingProduct, type SheetMapping } from "@/lib/import/types";
+import { SheetMappingSchema, type SheetMapping } from "@/lib/import/types";
 import { applyImportPlan } from "@/server/import-apply";
+import { loadExistingProducts } from "@/server/import-existing";
 import { jsonSafe } from "@/server/json-safe";
 
 const MAX_BYTES = 25 * 1024 * 1024;
@@ -132,7 +133,7 @@ export async function previewImportAction(importId: string, rawMapping: unknown)
     return { ok: false as const, error: "The uploaded rows are no longer cached. Upload again." };
   }
 
-  const existing = await loadExisting(user.orgId);
+  const existing = await loadExistingProducts(user.orgId);
   const preview = buildPreview({
     orgId: user.orgId,
     sheetName: mapping.sheetName,
@@ -152,57 +153,6 @@ export async function previewImportAction(importId: string, rawMapping: unknown)
     .where(eq(imports.id, importId));
 
   return { ok: true as const, preview };
-}
-
-async function loadExisting(orgId: string): Promise<ExistingProduct[]> {
-  const rows = await db
-    .select({
-      id: products.id,
-      partNumber: products.partNumber,
-      brandName: brands.name,
-      description: products.description,
-      status: products.status,
-    })
-    .from(products)
-    .leftJoin(brands, eq(brands.id, products.brandId))
-    .where(eq(products.orgId, orgId));
-
-  const ids = await db
-    .select({
-      productId: productIdentifiers.productId,
-      kind: productIdentifiers.kind,
-      value: productIdentifiers.value,
-    })
-    .from(productIdentifiers)
-    .where(eq(productIdentifiers.orgId, orgId));
-
-  const byProduct = new Map<string, Record<string, string>>();
-  for (const i of ids) {
-    const m = byProduct.get(i.productId) ?? {};
-    m[i.kind] = i.value;
-    byProduct.set(i.productId, m);
-  }
-
-  return rows.map((r) => {
-    const identifiers = byProduct.get(r.id) ?? {};
-    return {
-      id: r.id,
-      partNumber: r.partNumber,
-      brandName: r.brandName ?? "",
-      // Every GTIN form the product carries, so a re-import matching on a
-      // 12-digit UPC still recognises a product stored under its GTIN-14.
-      gtins: Object.entries(identifiers)
-        .filter(([kind]) => kind.startsWith("gtin"))
-        .map(([, value]) => value)
-        .filter(Boolean),
-      fields: {
-        description: r.description,
-        status: r.status,
-        partNumber: r.partNumber,
-        brandName: r.brandName ?? "",
-      },
-    };
-  });
 }
 
 export async function commitImportAction(importId: string) {

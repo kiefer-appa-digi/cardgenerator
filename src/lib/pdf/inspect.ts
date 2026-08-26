@@ -166,17 +166,21 @@ export type PdfPaintedExtent = {
   /** The operator that painted it, e.g. "f", "S", "Tj", "Do". */
   operator: string;
   /**
-   * Bounding box of the clipping path in effect when the mark was painted, in
-   * device space, or null when nothing was clipping. Bounding box, not the true
-   * region, so it is conservative: a mark reported as inside the clip really is
-   * inside it, a mark reported as outside might still have been clipped by a
+   * Bounding box of every clipping path in effect when the mark was painted,
+   * innermost last, in device space. Bounding boxes, not the true regions, so
+   * they are conservative: a mark reported as inside a clip really is inside
+   * it; a mark reported as outside might still have been clipped by a
    * non-rectangular path.
    *
-   * This is what separates "an element was dragged off the artboard" from "an
-   * image is cropped to its frame". Both put operator coordinates outside the
-   * page; only the first loses artwork the designer meant to keep.
+   * They are kept SEPARATE rather than pre-intersected because the validator
+   * has to tell them apart. An exporter wraps the whole page in a guard clip at
+   * the page boundary, and an image element adds a second clip at its own
+   * frame — which is the only way PDF can express a crop. Intersecting the two
+   * would erase the difference between "this photo is cropped to its frame"
+   * and "this element hangs off the artboard", and both of those put operator
+   * coordinates outside the page.
    */
-  clip: PdfClipBox | null;
+  clips: PdfClipBox[];
   /**
    * True when the matrix that placed this mark has a negative determinant, i.e.
    * the mark is mirrored. Live text and placed rasters are never legitimately
@@ -850,8 +854,8 @@ function buildFontModel(resourceName: string, dict: PDFDict, warnings: string[])
 
 type GState = {
   ctm: Mat;
-  /** Bounding box of the clip path in effect, device space. null = unclipped. */
-  clip: PdfClipBox | null;
+  /** Bounding box of each clip path in effect, outermost first, device space. */
+  clips: PdfClipBox[];
   fillSpace: string;
   strokeSpace: string;
   font: FontModel | null;
@@ -866,7 +870,7 @@ type GState = {
 };
 
 function cloneState(s: GState): GState {
-  return { ...s, ctm: [...s.ctm] as Mat, clip: s.clip ? { ...s.clip } : null };
+  return { ...s, ctm: [...s.ctm] as Mat, clips: s.clips.map((c) => ({ ...c })) };
 }
 
 /** Determinant of a PDF affine. Negative means the placement is mirrored. */
@@ -874,15 +878,7 @@ function determinant(m: Mat): number {
   return m[0] * m[3] - m[1] * m[2];
 }
 
-function intersectClip(a: PdfClipBox | null, b: PdfClipBox): PdfClipBox {
-  if (!a) return { ...b };
-  return {
-    x0: Math.max(a.x0, b.x0),
-    y0: Math.max(a.y0, b.y0),
-    x1: Math.min(a.x1, b.x1),
-    y1: Math.min(a.y1, b.y1),
-  };
-}
+
 
 type PageAccum = {
   textRuns: PdfTextRun[];
@@ -1080,7 +1076,7 @@ function interpret(
     // path-painting operator that follows has run (PDF 32000-1 §8.5.4). The
     // path's bounding box is a conservative stand-in for the real region.
     if (pendingClip && hasPoints) {
-      gs.clip = intersectClip(gs.clip, { x0, y0, x1, y1 });
+      gs.clips = [...gs.clips, { x0, y0, x1, y1 }];
     }
     pendingClip = false;
 
@@ -1095,7 +1091,7 @@ function interpret(
           x1,
           y1,
           operator: op,
-          clip: gs.clip ? { ...gs.clip } : null,
+          clips: gs.clips.map((c) => ({ ...c })),
           mirrored: determinant(gs.ctm) < 0,
         });
       }
@@ -1187,7 +1183,7 @@ function interpret(
         kind: "text",
         ...box,
         operator: "Tj",
-        clip: gs.clip ? { ...gs.clip } : null,
+        clips: gs.clips.map((c) => ({ ...c })),
         mirrored: determinant(trm) < 0,
       });
     }
@@ -1433,7 +1429,7 @@ function interpret(
             x1,
             y1,
             operator: "Do",
-            clip: gs.clip ? { ...gs.clip } : null,
+            clips: gs.clips.map((c) => ({ ...c })),
             mirrored: determinant(gs.ctm) < 0,
           });
           const pw = numberValue(xobj.dict.lookup(PDFName.of("Width"))) ?? 0;
@@ -1604,7 +1600,7 @@ function appearanceText(
   };
   const initial: GState = {
     ctm: [...IDENTITY] as Mat,
-    clip: null,
+    clips: [],
     fillSpace: "DeviceGray",
     strokeSpace: "DeviceGray",
     font: null,
@@ -1735,7 +1731,7 @@ function inspectPage(
   const fontCache = new Map<string, FontModel>();
   const initial: GState = {
     ctm: [...IDENTITY] as Mat,
-    clip: null,
+    clips: [],
     fillSpace: "DeviceGray",
     strokeSpace: "DeviceGray",
     font: null,

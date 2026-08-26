@@ -570,9 +570,10 @@ function mergeStatus(
       embedded: faceList.length,
       // Every face is embedded with subset: true and given a six-letter tag;
       // reading the tags back is a check, where `faceList.length > 0` would only
-      // have been an assumption.
-      allSubset:
-        faceList.length > 0 && faceList.every((f) => /^[A-Z]{6}$/.test(f.subsetTag)),
+      // have been an assumption. A card with no text embeds no faces, and "all
+      // of none are subset" is true — reporting false there would put "not all
+      // subset" on the export screen for a file that has nothing to subset.
+      allSubset: faceList.every((f) => /^[A-Z]{6}$/.test(f.subsetTag)),
       faces: faceList.map((f) => ({
         faceKey: f.faceKey,
         subsetTag: f.subsetTag,

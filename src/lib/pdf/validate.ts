@@ -470,17 +470,27 @@ function normaliseRotation(rotation: number): number {
 }
 
 /**
- * The extent that actually reaches the sheet, in device space.
+ * The extent a mark asks to occupy once its own crops are applied, device space.
  *
- * A clip path SMALLER than the page is authored intent: it is how a cropped
- * image is expressed, and `fit: "fill"` — the default for every image element —
- * always places the full raster on an enlarged rect and clips it to the frame.
- * Measuring the raw operator coordinates there would fail every card with a
- * cropped background photo, which is most of them.
+ * Every clip in effect is applied EXCEPT an outermost one that covers the whole
+ * page. That single exception is what makes the check mean anything:
  *
- * A clip that is the page (or larger) carries no crop intent — it is the
- * exporter's guard rail — so it is ignored and the raw extent is measured. That
- * is what keeps "an element was dragged off the artboard" a failure.
+ *  - The outermost page-covering clip is a guard rail. It excludes nothing from
+ *    the page, so honouring it would make the test vacuous — everything is
+ *    inside the page once you clip it to the page — and an element dragged off
+ *    the artboard would pass.
+ *  - Every clip established inside it narrows where one element may paint, and
+ *    that is a crop. `fit: "fill"` — the default for every image element — puts
+ *    the whole raster on an enlarged rect and clips it to the element frame,
+ *    because that is the only way PDF can express a crop. Measuring the raw
+ *    `Do` coordinates there condemns every card with a cropped background
+ *    photo, which is most real cards.
+ *
+ * What survives is the case that is unambiguous either way: a mark whose own
+ * crop still leaves it hanging over the page edge. The design-side question
+ * — "was this element meant to run off the artboard?" — cannot be answered from
+ * the PDF at all, because the element's frame is not in the file; that is what
+ * the preflight engine's TRIM_CROSSING rule reads the design document for.
  */
 function effectiveExtent(
   e: PdfPaintedExtent,
@@ -488,21 +498,25 @@ function effectiveExtent(
 ): { x0: number; y0: number; x1: number; y1: number; cropped: boolean } {
   const mx1 = media.x + media.width;
   const my1 = media.y + media.height;
-  const c = e.clip;
-  const authored =
-    c !== null &&
-    (c.x0 > media.x + BOX_TOLERANCE_PT ||
-      c.y0 > media.y + BOX_TOLERANCE_PT ||
-      c.x1 < mx1 - BOX_TOLERANCE_PT ||
-      c.y1 < my1 - BOX_TOLERANCE_PT);
-  if (!authored || !c) return { x0: e.x0, y0: e.y0, x1: e.x1, y1: e.y1, cropped: false };
-  return {
-    x0: Math.max(e.x0, c.x0),
-    y0: Math.max(e.y0, c.y0),
-    x1: Math.min(e.x1, c.x1),
-    y1: Math.min(e.y1, c.y1),
-    cropped: true,
-  };
+  let x0 = e.x0;
+  let y0 = e.y0;
+  let x1 = e.x1;
+  let y1 = e.y1;
+  let cropped = false;
+  e.clips.forEach((c, index) => {
+    const coversPage =
+      c.x0 <= media.x + BOX_TOLERANCE_PT &&
+      c.y0 <= media.y + BOX_TOLERANCE_PT &&
+      c.x1 >= mx1 - BOX_TOLERANCE_PT &&
+      c.y1 >= my1 - BOX_TOLERANCE_PT;
+    if (index === 0 && coversPage) return;
+    x0 = Math.max(x0, c.x0);
+    y0 = Math.max(y0, c.y0);
+    x1 = Math.min(x1, c.x1);
+    y1 = Math.min(y1, c.y1);
+    cropped = true;
+  });
+  return { x0, y0, x1, y1, cropped };
 }
 
 function sideOfPage(index: number): SideKey | null {
@@ -974,6 +988,12 @@ function checkImageResolution(insp: PdfInspection, exp: PdfExpectation): Validat
   let placementCount = 0;
 
   insp.pages.forEach((page, i) => {
+    if (!page.contentReadable) {
+      // Placements come from the CTM at each `Do`; with no readable content
+      // there is no placed size, so "no raster to measure" would be a guess.
+      results.push(unreadableResult(page, i, "the size any raster is placed at"));
+      return;
+    }
     if (page.images.length === 0) {
       results.push({
         page: i + 1,
@@ -1282,7 +1302,7 @@ function checkNoClipping(insp: PdfInspection, exp: PdfExpectation): ValidationCh
         ? `Content is being clipped away by the page: ${offenders.slice(-3).join("; ")}. MediaBox is ${describeBox(box)}.`
         : `Everything painted lies inside the MediaBox ${describeBox(box)}${
             croppedMarks > 0
-              ? ` (${croppedMarks} mark(s) measured through their own crop, which is how a "fill"/"crop" image is expressed and is not the page clipping anything)`
+              ? ` (${croppedMarks} mark(s) measured through their own crop, which is how a "fill"/"crop" image is written and is not the page clipping anything)`
               : ""
           }; content bounds are ${
             page.paintedBounds
@@ -1310,11 +1330,12 @@ function checkNoClipping(insp: PdfInspection, exp: PdfExpectation): ValidationCh
     measured: worstWhere
       ? `${insp.pages.reduce((n, p) => n + p.paintedExtents.length, 0)} painted mark(s); furthest overhang ${fmtPt(Math.max(0, worst))} (${worstWhere})`
       : "nothing painted",
-    expected: "every drawing operator's coordinates inside the MediaBox",
+    expected:
+      "every painted mark inside the MediaBox once its own crop is applied",
     tolerance: `±${fmtPt(tol)} overhang`,
     detail:
       status === "pass"
-        ? `Path points, image placements and text em-boxes were transformed through the CTM and compared with the MediaBox, after intersecting each mark with any clip path smaller than the page — that clip is how a cropped or "fill"-fitted image is written, and measuring the raw operator coordinates there would condemn every card with a cropped background photo. Full-bleed artwork sits exactly on the page edge at 0 overhang; the ${fmtPt(tol)} allowance exists because a text extent is reconstructed as an em-box from the font's ascent and descent and a stroke is measured on its centreline.`
+        ? `Path points, image placements and text em-boxes were transformed through the CTM and compared with the MediaBox, after applying every clip path in effect except an outermost one that covers the whole page. That exception is what makes the test mean anything: the page-wide guard clip excludes nothing, while a clip inside it is a crop — which is the only way PDF can write a "fill"-fitted image, and measuring its raw Do coordinates would condemn every card with a cropped background photo. Full-bleed artwork sits exactly on the page edge at 0 overhang; the ${fmtPt(tol)} allowance exists because a text extent is reconstructed as an em-box from the font's ascent and descent and a stroke is measured on its centreline.`
         : results.filter((r) => r.status === "fail").map((r) => `Page ${r.page}: ${r.detail}`).join(" "),
     measurements: {
       worstOverhangPt: Number(Math.max(0, Number.isFinite(worst) ? worst : 0).toFixed(6)),

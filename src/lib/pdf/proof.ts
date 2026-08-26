@@ -283,15 +283,16 @@ function overlayLabel(
 /* ---------------------------------------------------------------- overlay */
 
 /**
- * Safe-area corner radius. The safe rect is inset from trim, so its corners
- * follow the trim arc reduced by the inset. Computed from the left inset, which
- * is exact for the uniform insets all three presets ship with and conservative
- * (a slightly tighter arc) for a non-uniform override.
+ * The safe area's corner radius is `plan.safeCornerRadius` and nothing else.
+ *
+ * It used to be recomputed here from the LEFT inset alone. That agreed with the
+ * plan for the uniform insets the three presets ship with, and disagreed for any
+ * `safeAreaOverride` whose sides differ: the plan derives the radius from the
+ * SMALLEST inset (the strictest test), so a design with left 0.4 in / top 0.1 in
+ * was drawn on the proof with a 0 in radius while preflight enforced 0.15 in.
+ * An operator would then see artwork comfortably inside the line on the proof and
+ * be told by preflight that it is outside. One value, computed once, in the plan.
  */
-function safeCornerRadius(plan: SidePlan): Upt {
-  const inset = plan.safe.x - plan.trim.x;
-  return clampRadius(plan.safe, Math.max(0, plan.cornerRadius - inset));
-}
 
 function drawCropMarks(page: PDFPage, space: CardSpace, trim: Rect): void {
   const offset = ptToUpt(CROP_MARK_OFFSET_PT);
@@ -354,7 +355,7 @@ function drawOverlay(
   strokeSegs(page, space, roundedRectPath(canvas, 0), OVERLAY.bleed, 0.5);
   // Trim, with the real corner radius — the line the die actually cuts.
   strokeSegs(page, space, roundedRectPath(trim, plan.cornerRadius), OVERLAY.trim, 0.7);
-  strokeSegs(page, space, roundedRectPath(safe, safeCornerRadius(plan)), OVERLAY.safe, 0.5, [4, 2]);
+  strokeSegs(page, space, roundedRectPath(safe, plan.safeCornerRadius), OVERLAY.safe, 0.5, [4, 2]);
   // Cavity footprint, from the measured dieline geometry (§17).
   strokeSegs(
     page,
@@ -487,6 +488,19 @@ function inches(u: Upt): string {
     .replace(/\.0+$/, "");
 }
 
+/**
+ * The safe inset, per side. `safeAreaOverride` may differ on each side, and a
+ * proof that reports only the left one states a dimension the card does not have.
+ */
+function safeInsetText(plan: SidePlan): string {
+  const left = plan.safe.x - plan.trim.x;
+  const top = plan.safe.y - plan.trim.y;
+  const right = rectRight(plan.trim) - rectRight(plan.safe);
+  const bottom = rectBottom(plan.trim) - rectBottom(plan.safe);
+  if (left === top && top === right && right === bottom) return `${inches(left)} in`;
+  return `T ${inches(top)} R ${inches(right)} B ${inches(bottom)} L ${inches(left)} in`;
+}
+
 function shortFields(plan: SidePlan, preset: CardPresetDef, info: ProofInfo): SlugField[] {
   return [
     { label: "CARD", value: info.cardName || "—" },
@@ -497,7 +511,7 @@ function shortFields(plan: SidePlan, preset: CardPresetDef, info: ProofInfo): Sl
     { label: "REVISION", value: info.revision || "—" },
     { label: "SIDE", value: plan.side.toUpperCase() },
     { label: "CORNER", value: `R ${inches(plan.cornerRadius)} in` },
-    { label: "SAFE INSET", value: `${inches(plan.safe.x - plan.trim.x)} in from trim` },
+    { label: "SAFE INSET", value: `${safeInsetText(plan)} from trim` },
     { label: "BLEED", value: `${inches(plan.trim.x - plan.canvas.x)} in per side` },
     { label: "APPROVAL", value: info.approvalStatus || "Not recorded" },
     { label: "EXPORTED", value: info.exportedAt ?? "—" },
@@ -645,6 +659,47 @@ function drawSlug(
 
 /* ------------------------------------------------------------------ entry */
 
+/**
+ * The proof names a clamshell. If `info.presetCode` does not describe the card
+ * the plans were laid out on, the slug names one part and the sheet is another —
+ * and the cavity outline is drawn from the plan's rect with the NAMED preset's
+ * corner radius, so the overlay itself is a hybrid of two cards. Somebody orders
+ * the wrong clamshell off a proof that looked fine. Fail instead.
+ */
+export class ProofPresetMismatchError extends Error {
+  readonly code = "PROOF_PRESET_MISMATCH" as const;
+  constructor(
+    readonly presetCode: CardPresetDef["code"],
+    readonly detail: string,
+  ) {
+    super(
+      `The proof was asked to label this card "${presetCode}", but the supplied ` +
+        `plans are not ${presetCode} artwork: ${detail}. A proof states the part it ` +
+        `is for, so it is not rendered against a preset it does not match.`,
+    );
+    this.name = "ProofPresetMismatchError";
+  }
+}
+
+function assertPlansMatchPreset(plans: readonly SidePlan[], preset: CardPresetDef): void {
+  for (const plan of plans) {
+    if (plan.trim.w !== preset.trimWidth || plan.trim.h !== preset.trimHeight) {
+      throw new ProofPresetMismatchError(
+        preset.code,
+        `the ${plan.side} trim is ${inches(plan.trim.w)} × ${inches(plan.trim.h)} in, ` +
+          `not ${inches(preset.trimWidth)} × ${inches(preset.trimHeight)} in`,
+      );
+    }
+    if (plan.cornerRadius !== preset.cornerRadius) {
+      throw new ProofPresetMismatchError(
+        preset.code,
+        `the ${plan.side} corner radius is ${inches(plan.cornerRadius)} in, ` +
+          `not ${inches(preset.cornerRadius)} in`,
+      );
+    }
+  }
+}
+
 /** Faces the proof chrome itself needs, on top of whatever the artwork uses. */
 export const PROOF_CHROME_FACES = ["Inter:400", "Inter:700"] as const;
 
@@ -661,6 +716,7 @@ export const PROOF_OVERLAY_LABELS = [
 export async function renderProofPdf(opts: ProofPdfOptions): Promise<PdfExportResult> {
   const plans = [opts.plans.front, opts.plans.back];
   const preset = CARD_PRESETS[opts.info.presetCode];
+  assertPlansMatchPreset(plans, preset);
   const withOverlay = opts.overlay !== false;
 
   const doc = await PDFDocument.create({ updateMetadata: false });

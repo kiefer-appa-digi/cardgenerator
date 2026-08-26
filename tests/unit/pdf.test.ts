@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
+import { createHash } from "node:crypto";
 import fontkit from "@pdf-lib/fontkit";
 import { PDFArray, PDFDict, PDFDocument, PDFName, PDFRawStream, decodePDFRawStream } from "pdf-lib";
 import { inToUpt, ptToUpt, uptToPt } from "@/lib/units";
@@ -29,7 +30,7 @@ import {
   decodeIccProfile,
   renderProductionPdf,
 } from "@/lib/pdf/production";
-import { PROOF_MARGINS, renderProofPdf } from "@/lib/pdf/proof";
+import { PROOF_MARGINS, ProofPresetMismatchError, renderProofPdf } from "@/lib/pdf/proof";
 
 /**
  * PDF EXPORT TESTS — spec §22 "EXPORT VALIDATION".
@@ -1143,6 +1144,211 @@ describe("plan fidelity", () => {
   });
 });
 
+/* ------------------------------------------- subset tags identify a SUBSET */
+
+/** A one-text-element card, so the only variable between two files is the copy. */
+function oneLineDesign(text: string): DesignDoc {
+  return DesignDocSchema.parse({
+    version: 1,
+    presetCode: "409TF",
+    front: {
+      side: "front",
+      elements: [
+        {
+          id: "t",
+          kind: "text",
+          frame: { x: IN(0.3), y: IN(0.3), w: IN(3.5), h: IN(0.5) },
+          paragraphs: [{ runs: [{ text }] }],
+          fontFamily: "Inter",
+          fontWeight: 600,
+          fontSize: 12_000_000,
+          color: cmykPct(0, 0, 0, 100),
+        },
+      ],
+    },
+    back: { side: "back", elements: [] },
+  });
+}
+
+function oneLinePlans(text: string) {
+  return planDocument({ doc: oneLineDesign(text), product: product(), assets: new Map() });
+}
+
+/** Every embedded font in a file, as (full /BaseFont, sha of the program). */
+async function embeddedFontIdentities(bytes: Uint8Array): Promise<Array<[string, string]>> {
+  const doc = await PDFDocument.load(bytes, { updateMetadata: false });
+  const out: Array<[string, string]> = [];
+  for (const [, obj] of doc.context.enumerateIndirectObjects()) {
+    if (!(obj instanceof PDFDict)) continue;
+    if (obj.get(PDFName.of("Subtype"))?.toString() !== "/CIDFontType2") continue;
+    const fd = doc.context.lookup(obj.get(PDFName.of("FontDescriptor")), PDFDict);
+    const file = fd && doc.context.lookup(fd.get(PDFName.of("FontFile2")));
+    if (!(file instanceof PDFRawStream)) continue;
+    const program = decodePDFRawStream(file).decode();
+    out.push([
+      String(obj.get(PDFName.of("BaseFont"))),
+      createHash("sha256").update(program).digest("hex"),
+    ]);
+  }
+  return out.sort();
+}
+
+describe("subset tags identify the subset, not just the face (ISO 32000-1 §9.6.4)", () => {
+  /**
+   * REGRESSION GUARD.
+   *
+   * A tag derived from the face key alone names the FACE. Two cards that set the
+   * same families embed the same faces in the same sorted order, so pdf-lib's
+   * SEEDED rng hands both files the identical `/Inter-SemiBold-9742` — and a
+   * face-keyed tag then makes both `/DOGXPG+Inter-SemiBold-9742` while they hold
+   * different glyphs. Merging tools de-duplicate fonts by name, and imposing two
+   * such cards on one press sheet drops glyphs from one of them.
+   */
+  it("two cards with different copy do not share a /BaseFont", async () => {
+    const a = await renderProductionPdf({ plans: oneLinePlans("AAAA BBBB") });
+    const b = await renderProductionPdf({ plans: oneLinePlans("wxyz 9876 %%%") });
+
+    const fa = await embeddedFontIdentities(a.bytes);
+    const fb = await embeddedFontIdentities(b.bytes);
+    expect(fa).toHaveLength(1);
+    expect(fb).toHaveLength(1);
+
+    // Different glyph sets — this is the precondition that makes the names matter.
+    expect(fa[0][1]).not.toBe(fb[0][1]);
+    expect(fa[0][0], "different subsets must not share a /BaseFont").not.toBe(fb[0][0]);
+    expect(fa[0][0]).toMatch(/^\/[A-Z]{6}\+/);
+    expect(fb[0][0]).toMatch(/^\/[A-Z]{6}\+/);
+  });
+
+  it("the same subset always gets the same tag, so exports stay reproducible", async () => {
+    const a = await renderProductionPdf({ plans: oneLinePlans("AAAA BBBB") });
+    const b = await renderProductionPdf({ plans: oneLinePlans("AAAA BBBB") });
+    expect(await embeddedFontIdentities(a.bytes)).toEqual(await embeddedFontIdentities(b.bytes));
+  });
+
+  it("every tag inside one file is distinct, and matches what the status reports", async () => {
+    const result = await renderProductionPdf({ plans: plansFor("409TF") });
+    const inFile = (await embeddedFontIdentities(result.bytes)).map(([base]) =>
+      /^\/([A-Z]{6})\+/.exec(base)![1],
+    );
+    expect(inFile.length).toBeGreaterThan(3);
+    expect(new Set(inFile).size, "tags are unique within the file").toBe(inFile.length);
+
+    // complianceStatus must report the tag that is actually written, not the
+    // provisional one the embedder used before the subset existed.
+    const reported = result.complianceStatus.fonts.faces.map((f) => f.subsetTag).sort();
+    expect(reported).toEqual([...inFile].sort());
+  });
+
+  it("a card with no text embeds nothing and does not claim a font failed to subset", async () => {
+    const plans = planDocument({
+      doc: DesignDocSchema.parse({
+        version: 1,
+        presetCode: "409TF",
+        front: { side: "front", elements: [] },
+        back: { side: "back", elements: [] },
+      }),
+      product: product(),
+      assets: new Map(),
+    });
+    const result = await renderProductionPdf({ plans });
+    expect(result.complianceStatus.fonts.embedded).toBe(0);
+    expect(result.complianceStatus.fonts.allSubset).toBe(true);
+  });
+});
+
+/* ------------------------------------------------- proof / plan agreement */
+
+describe("the proof describes the card it was actually given", () => {
+  /**
+   * REGRESSION GUARD.
+   *
+   * The safe area's corner radius used to be recomputed inside proof.ts from the
+   * LEFT inset alone, while `SidePlan.safeCornerRadius` — the value preflight
+   * enforces — derives it from the SMALLEST inset. With a non-uniform
+   * `safeAreaOverride` the proof drew a square corner where preflight enforced a
+   * 0.15 in arc, so artwork could sit visibly inside the line on the proof and
+   * still be rejected.
+   */
+  it("draws the safe area with the plan's own corner radius, not a second guess", async () => {
+    const doc = DesignDocSchema.parse({
+      version: 1,
+      presetCode: "409TF",
+      safeAreaOverride: { top: IN(0.1), right: IN(0.1), bottom: IN(0.1), left: IN(0.4) },
+      front: { side: "front", elements: [] },
+      back: { side: "back", elements: [] },
+    });
+    const plans = planDocument({ doc, product: product(), assets: new Map() });
+    expect(uptToPt(plans.front.safeCornerRadius)).toBeCloseTo(10.8, 10);
+
+    const proof = await renderProofPdf({
+      plans,
+      info: {
+        cardName: "C",
+        sku: "S",
+        gtin: "G",
+        presetCode: "409TF",
+        revision: "r",
+        approvalStatus: "Draft",
+      },
+    });
+    const content = await contentStream(proof.bytes, 0);
+    // The safe rule is the only 4-2 dashed stroke on the sheet.
+    const path = /1 0 1 0 K\n0\.5 w\n\[4 2\] 0 d\n(-?[\d.]+) (-?[\d.]+) m/.exec(content);
+    expect(path, "safe-area stroke").not.toBeNull();
+
+    // A rounded-rect path starts at (x + radius, y), so the first moveTo tells us
+    // the radius the proof actually drew.
+    const safeLeftPt = proof.pageBoxes[0].bleedBox.x + uptToPt(plans.front.safe.x);
+    expectClose(
+      Number(path![1]) - safeLeftPt,
+      uptToPt(plans.front.safeCornerRadius),
+      "safe-area corner radius drawn on the proof",
+    );
+  });
+
+  it("refuses to label a proof with a preset the plans are not", async () => {
+    await expect(
+      renderProofPdf({
+        plans: plansFor("409TF"),
+        info: {
+          cardName: "C",
+          sku: "S",
+          gtin: "G",
+          presetCode: "206TF",
+          revision: "r",
+          approvalStatus: "Draft",
+        },
+      }),
+    ).rejects.toBeInstanceOf(ProofPresetMismatchError);
+  });
+
+  it("reports every safe inset when they differ, rather than only the left one", async () => {
+    const doc = DesignDocSchema.parse({
+      version: 1,
+      presetCode: "409TF",
+      safeAreaOverride: { top: IN(0.1), right: IN(0.2), bottom: IN(0.3), left: IN(0.4) },
+      front: { side: "front", elements: [] },
+      back: { side: "back", elements: [] },
+    });
+    const plans = planDocument({ doc, product: product(), assets: new Map() });
+    const proof = await renderProofPdf({
+      plans,
+      info: {
+        cardName: "C",
+        sku: "S",
+        gtin: "G",
+        presetCode: "409TF",
+        revision: "r",
+        approvalStatus: "Draft",
+      },
+    });
+    const info = await inspectPdf(proof.bytes);
+    const text = info.pages[0].textContent;
+    expect(text).toContain("T 0.1 R 0.2 B 0.3 L 0.4 in");
+  });
+});
+
 /**
  * PRINT QA HOOK — spec §32 forbids calling print QA complete without inspecting
  * a generated PDF. Set PDF_ARTIFACT_DIR to have the suite drop real files there
@@ -1189,46 +1395,3 @@ describe.runIf(Boolean(process.env.PDF_ARTIFACT_DIR))("artifact dump", () => {
     expect(fs.readdirSync(dir).length).toBeGreaterThanOrEqual(6);
   });
 });
-
-describe.runIf(Boolean(process.env.PDF_ARTIFACT_DIR))("artifact dump", () => {
-  it("writes production and proof PDFs for every preset", async () => {
-    const dir = process.env.PDF_ARTIFACT_DIR!;
-    fs.mkdirSync(dir, { recursive: true });
-    for (const code of ["409TF", "277TF", "206TF"] as const) {
-      const plans = plansFor(code, { withImage: true, withRotation: true });
-      const production = await renderProductionPdf({ plans, assetBytes: loadAsset });
-      fs.writeFileSync(path.join(dir, `${code}-production.pdf`), production.bytes);
-      const proof = await renderProofPdf({
-        plans,
-        assetBytes: loadAsset,
-        info: {
-          cardName: "Trailer Hub Repair Kit",
-          sku: "11-500",
-          gtin: "00012345678905",
-          presetCode: code,
-          revision: "rev-4",
-          approvalStatus: "Approved 2026-08-26 by J. Rivera",
-          exportedAt: "2026-08-26T18:00:00Z",
-          productName: "Trailer Hub Repair Kit",
-          note: "Print on 18 pt C1S. Verify cavity clearance against a physical clamshell before release.",
-        },
-      });
-      fs.writeFileSync(path.join(dir, `${code}-proof.pdf`), proof.bytes);
-    }
-    // A card with no placed raster: the honest measure of what the vector
-    // pipeline itself costs.
-    const lean = await renderProductionPdf({ plans: plansFor("409TF") });
-    fs.writeFileSync(path.join(dir, "409TF-production-no-image.pdf"), lean.bytes);
-    console.log("no-image production bytes:", lean.bytes.byteLength);
-    console.log(
-      "embedded faces:",
-      JSON.stringify(lean.complianceStatus.fonts.faces.map((f) => f.faceKey)),
-    );
-    const info = await inspectPdf(lean.bytes);
-    for (const f of info.fonts) {
-      console.log("  ", f.baseFont, "FontFile2 bytes:", f.fontFileBytes);
-    }
-    expect(fs.readdirSync(dir).length).toBeGreaterThanOrEqual(6);
-  });
-});
-

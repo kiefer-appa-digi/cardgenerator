@@ -6,6 +6,7 @@ import {
   PDFArray,
   PDFDict,
   PDFName,
+  PDFRawStream,
   type EmbedFontOptions,
   type PDFDocument,
   type PDFFont,
@@ -46,11 +47,14 @@ import { FONT_FAMILIES, faceKeyOf } from "@/lib/text/fonts";
  * 2. SUBSET FONTS NEED A SUBSET TAG.
  *
  *    pdf-lib writes /BaseFont as e.g. `/Inter-SemiBold-9742` for a subset. ISO
- *    32000 (and every PDF/X part) requires a subset font's name to carry a
- *    six-uppercase-letter tag and a `+`. `finaliseFontSubsets()` rewrites the
- *    name to `ABCDEF+Inter-SemiBold` after the document is flushed. The tag is
- *    derived deterministically from the face key, so the same design exports to
- *    the same bytes every time.
+ *    32000-1 §9.6.4 requires a subset font's name to carry a six-uppercase-letter
+ *    tag and a `+`, and requires DIFFERENT SUBSETS to carry DIFFERENT tags.
+ *    `finaliseFontSubsets()` rewrites the name to `ABCDEF+Inter-SemiBold` after
+ *    the document is flushed, hashing the embedded /FontFile2 program so the tag
+ *    identifies the subset and not merely the face. Content-addressing it keeps
+ *    the export deterministic — the same design always produces the same bytes —
+ *    while making it impossible for two cards with different copy to hand a
+ *    merging or imposition tool two different fonts under one name.
  */
 
 /** Where the TTFs live, relative to `process.cwd()`, in preference order. */
@@ -402,17 +406,24 @@ function docFaces(doc: PDFDocument): Map<string, EmbeddedFace> {
   return m;
 }
 
-/**
- * Six uppercase letters, derived from the face key by FNV-1a. Deterministic
- * because the exported bytes have to be: the same design must produce the same
- * file, and a random tag would break that.
- */
-export function subsetTag(seed: string): string {
+/** FNV-1a over a string, then optionally over a byte range. */
+function fnv1a(seed: string, extra?: Uint8Array): number {
   let h = 0x811c9dc5;
   for (let i = 0; i < seed.length; i += 1) {
     h ^= seed.charCodeAt(i);
     h = Math.imul(h, 0x01000193) >>> 0;
   }
+  if (extra) {
+    for (let i = 0; i < extra.length; i += 1) {
+      h ^= extra[i];
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+  }
+  return h;
+}
+
+function tagFromHash(hash: number): string {
+  let h = hash >>> 0;
   let out = "";
   for (let i = 0; i < 6; i += 1) {
     out += String.fromCharCode(65 + (h % 26));
@@ -421,6 +432,39 @@ export function subsetTag(seed: string): string {
     h = Math.floor(h / 26) + 7;
   }
   return out;
+}
+
+/**
+ * Six uppercase letters, derived from a seed by FNV-1a. Deterministic because
+ * the exported bytes have to be: the same design must produce the same file, and
+ * a random tag would break that.
+ *
+ * Used as the PROVISIONAL tag at embed time. The tag that actually reaches
+ * /BaseFont is computed by `subsetTagForProgram` once the subset exists — see
+ * `finaliseFontSubsets`.
+ */
+export function subsetTag(seed: string): string {
+  return tagFromHash(fnv1a(seed));
+}
+
+/**
+ * The tag for one embedded subset, derived from the face key AND the subset
+ * program itself.
+ *
+ * A tag keyed only on the face key names the FACE, not the SUBSET, and that is
+ * the one thing a subset prefix must not do. Two cards that both set Inter
+ * SemiBold get the same seven faces embedded in the same sorted order, so
+ * pdf-lib's seeded RNG hands both files the identical `/BaseFont
+ * /Inter-SemiBold-9742` — and with a face-keyed tag both become
+ * `/DOGXPG+Inter-SemiBold-9742` while holding different glyphs. ISO 32000-1
+ * §9.6.4 requires different subsets to carry different tags precisely because
+ * merging tools de-duplicate fonts by name: impose two such cards on one press
+ * sheet and one of them silently loses glyphs. Hashing the program makes the tag
+ * content-addressed — identical subsets share a tag, different subsets never do,
+ * and the same design still exports to the same bytes every time.
+ */
+export function subsetTagForProgram(faceKey: string, program: Uint8Array): string {
+  return tagFromHash(fnv1a(`${faceKey}\u0000`, program));
 }
 
 /**
@@ -466,32 +510,70 @@ export async function embedFaces(
   };
 }
 
+/** The embedded subset program for one face, or null if it cannot be found. */
+function fontProgramOf(doc: PDFDocument, cid: PDFDict): Uint8Array | null {
+  const fd = cid.lookupMaybe(PDFName.of("FontDescriptor"), PDFDict);
+  if (!fd) return null;
+  for (const key of ["FontFile2", "FontFile3", "FontFile"]) {
+    const stream = doc.context.lookup(fd.get(PDFName.of(key)));
+    // The stored (still Flate-encoded) bytes are what identifies this subset;
+    // they are a pure function of the glyphs embedded, so hashing them needs no
+    // decode and stays deterministic.
+    if (stream instanceof PDFRawStream) return stream.contents;
+  }
+  return null;
+}
+
 /**
  * Rewrite /BaseFont (and the descendant CIDFont's /BaseFont and the
  * FontDescriptor's /FontName) to carry a proper subset tag.
  *
  * Must be called AFTER `doc.flush()`, because pdf-lib only materialises the font
- * dictionaries when the document is flushed. `save()` flushes again, which is a
- * no-op for fonts already embedded, so the rename survives.
+ * dictionaries — and the /FontFile2 program the tag is derived from — when the
+ * document is flushed. `save()` flushes again, which is a no-op for fonts already
+ * embedded, so the rename survives.
+ *
+ * The tag written here replaces the provisional one on the `EmbeddedFace`, so
+ * `complianceStatus.fonts` reports the tag that is actually in the file rather
+ * than the one the embedder guessed before the subset existed.
  */
 export async function finaliseFontSubsets(
   doc: PDFDocument,
   faces: EmbeddedFaces,
 ): Promise<void> {
   await doc.flush();
+  const used = new Set<string>();
   for (const entry of faces.all()) {
     const type0 = doc.context.lookupMaybe(entry.font.ref, PDFDict);
     if (!type0) continue;
     const base = type0.get(PDFName.of("BaseFont"));
     if (!(base instanceof PDFName)) continue;
     const current = base.asString().replace(/^\//, "");
-    if (/^[A-Z]{6}\+/.test(current)) continue;
-    const tagged = PDFName.of(`${entry.subsetTag}+${current}`);
-    type0.set(PDFName.of("BaseFont"), tagged);
+    const already = /^([A-Z]{6})\+/.exec(current);
+    if (already) {
+      used.add(already[1]);
+      continue;
+    }
 
     // /DescendantFonts is a one-element array holding the CIDFont dictionary.
     const descendants = type0.lookupMaybe(PDFName.of("DescendantFonts"), PDFArray);
     const cid = descendants?.lookupMaybe(0, PDFDict);
+    const program = cid ? fontProgramOf(doc, cid) : null;
+
+    // Two different subsets must never share a tag inside one file. A 32-bit
+    // hash makes that vanishingly unlikely, but "unlikely" is not "cannot", so
+    // a collision is resolved deterministically rather than left to chance.
+    let tag = program
+      ? subsetTagForProgram(entry.faceKey, program)
+      : subsetTag(entry.faceKey);
+    for (let salt = 1; used.has(tag); salt += 1) {
+      tag = subsetTag(`${entry.faceKey}#${salt}#${tag}`);
+    }
+    used.add(tag);
+    entry.subsetTag = tag;
+
+    const tagged = PDFName.of(`${tag}+${current}`);
+    type0.set(PDFName.of("BaseFont"), tagged);
     if (!cid) continue;
     cid.set(PDFName.of("BaseFont"), tagged);
     const fd = cid.lookupMaybe(PDFName.of("FontDescriptor"), PDFDict);

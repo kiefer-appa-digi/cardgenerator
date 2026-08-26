@@ -14,13 +14,13 @@ import { createHash } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { db } from "../src/server/db/client";
-import { brands, imports, organizations, productIdentifiers, products } from "../src/server/db/schema";
+import { imports, organizations } from "../src/server/db/schema";
 import { parseWorkbook, readParsedSheetRows, inspectParsedWorkbook } from "../src/lib/import/inspect";
 import { suggestMapping } from "../src/lib/import/mapping";
 import { buildPreview } from "../src/lib/import/preview";
 import { planImport } from "../src/lib/import/commit";
-import type { ExistingProduct } from "../src/lib/import/types";
 import { applyImportPlan } from "../src/server/import-apply";
+import { loadExistingProducts } from "../src/server/import-existing";
 
 async function main() {
   const file = process.argv[2];
@@ -45,7 +45,7 @@ async function main() {
     console.log(`missing required: ${mapping.missingRequired.join(", ")}`);
   }
 
-  const existing = await loadExisting(org.id);
+  const existing = await loadExistingProducts(org.id);
   const preview = buildPreview({
     orgId: org.id,
     sheetName: read.sheetName,
@@ -106,52 +106,6 @@ async function main() {
     console.log(`${report.partNumberFromSku} part numbers taken from the SKU column`);
   }
   for (const e of report.errors.slice(0, 10)) console.log(`  row ${e.rowNumber}: ${e.message}`);
-}
-
-async function loadExisting(orgId: string): Promise<ExistingProduct[]> {
-  const rows = await db
-    .select({
-      id: products.id,
-      partNumber: products.partNumber,
-      brandName: brands.name,
-      description: products.description,
-      status: products.status,
-    })
-    .from(products)
-    .leftJoin(brands, eq(brands.id, products.brandId))
-    .where(eq(products.orgId, orgId));
-  const ids = await db
-    .select({
-      productId: productIdentifiers.productId,
-      kind: productIdentifiers.kind,
-      value: productIdentifiers.value,
-    })
-    .from(productIdentifiers)
-    .where(eq(productIdentifiers.orgId, orgId));
-  const byProduct = new Map<string, Record<string, string>>();
-  for (const i of ids) {
-    const m = byProduct.get(i.productId) ?? {};
-    m[i.kind] = i.value;
-    byProduct.set(i.productId, m);
-  }
-  return rows.map((r) => {
-    const identifiers = byProduct.get(r.id) ?? {};
-    return {
-      id: r.id,
-      partNumber: r.partNumber,
-      brandName: r.brandName ?? "",
-      gtins: Object.entries(identifiers)
-        .filter(([k]) => k.startsWith("gtin"))
-        .map(([, v]) => v)
-        .filter(Boolean),
-      fields: {
-        description: r.description,
-        status: r.status,
-        partNumber: r.partNumber,
-        brandName: r.brandName ?? "",
-      },
-    };
-  });
 }
 
 main()
