@@ -187,6 +187,31 @@ export type PdfPaintedExtent = {
 
 export type PdfRect = { x: number; y: number; width: number; height: number };
 
+/* ----------------------------------------------------------- annotations */
+
+/**
+ * An entry in the page's /Annots array.
+ *
+ * Annotations are NOT in the content stream, so a validator that only walks
+ * content is blind to them — yet a printable annotation puts ink on the sheet
+ * exactly like artwork does. A stamp, a review note, a "TRIM GUIDE" square: all
+ * of them reach the press if /F has the Print bit set. Every PDF/X part forbids
+ * an annotation whose rectangle touches the BleedBox/TrimBox for that reason.
+ */
+export type PdfAnnotationInfo = {
+  subtype: string;
+  /** /Rect, normalised to a lower-left origin, PDF points. Null when unreadable. */
+  rect: PdfRect | null;
+  /** /F annotation flags as written. */
+  flags: number;
+  /** Print bit (4) set, Hidden (2) and NoView (32) clear. */
+  printable: boolean;
+  /** /Contents — the note text a reviewer typed. */
+  contents: string;
+  /** Text found inside the normal appearance stream, in reading order. */
+  appearanceText: string;
+};
+
 /* --------------------------------------------------------------- results */
 
 export type PdfPageInspection = {
@@ -216,6 +241,16 @@ export type PdfPageInspection = {
   paintedBounds: { x0: number; y0: number; x1: number; y1: number } | null;
   /** Decompressed content-stream size, bytes. */
   contentBytes: number;
+  /**
+   * False when at least one of the page's content streams could not be
+   * decoded. Nothing may be concluded from the *absence* of something on such a
+   * page — "no overlay text found" is then a statement about the parser, not
+   * about the file — so `validate.ts` fails the absence checks instead of
+   * passing them.
+   */
+  contentReadable: boolean;
+  /** Entries in /Annots. Empty for artwork written by this application. */
+  annotations: PdfAnnotationInfo[];
   /** Parse problems that did not stop the inspection. */
   warnings: string[];
 };
@@ -303,16 +338,24 @@ function stringValue(obj: unknown): string | null {
 
 /** Decompress any stream pdf-lib can decode; returns empty on an unknown filter. */
 function streamBytes(stream: PDFStream | undefined, warnings: string[]): Uint8Array {
-  if (!stream) return new Uint8Array(0);
+  return decodeStream(stream, warnings).bytes;
+}
+
+/** As `streamBytes`, but says whether the decode actually worked. */
+function decodeStream(
+  stream: PDFStream | undefined,
+  warnings: string[],
+): { bytes: Uint8Array; ok: boolean } {
+  if (!stream) return { bytes: new Uint8Array(0), ok: true };
   if (!(stream instanceof PDFRawStream)) {
     // A PDFContentStream we built ourselves is already uncompressed.
-    return stream.getContents();
+    return { bytes: stream.getContents(), ok: true };
   }
   try {
-    return decodePDFRawStream(stream).decode();
+    return { bytes: decodePDFRawStream(stream).decode(), ok: true };
   } catch (err) {
     warnings.push(`could not decode a stream: ${(err as Error).message}`);
-    return new Uint8Array(0);
+    return { bytes: new Uint8Array(0), ok: false };
   }
 }
 
@@ -983,6 +1026,8 @@ function interpret(
   let subpaths: Array<Array<[number, number]>> = [];
   let currentPoint: [number, number] = [0, 0];
   let startPoint: [number, number] = [0, 0];
+  /** Set by `W`/`W*`, consumed by the next path-painting operator. */
+  let pendingClip = false;
 
   // Text state.
   let tm: Mat = [...IDENTITY] as Mat;
@@ -1031,11 +1076,34 @@ function interpret(
         if (y > y1) y1 = y;
       }
     }
-    if (hasPoints) acc.paintedExtents.push({ kind: "path", x0, y0, x1, y1, operator: op });
-    if (FILL_OPS.has(op)) {
-      for (const sp of subpaths) {
-        const r = asAxisAlignedRect(sp);
-        if (r) acc.filledRects.push(r);
+    // `W`/`W*` do not paint: they arm the clip, which takes effect only once the
+    // path-painting operator that follows has run (PDF 32000-1 §8.5.4). The
+    // path's bounding box is a conservative stand-in for the real region.
+    if (pendingClip && hasPoints) {
+      gs.clip = intersectClip(gs.clip, { x0, y0, x1, y1 });
+    }
+    pendingClip = false;
+
+    // `n` ends a path without inking it — the `W n` idiom — so it contributes
+    // no painted extent and no filled rectangle.
+    if (op !== "n") {
+      if (hasPoints) {
+        acc.paintedExtents.push({
+          kind: "path",
+          x0,
+          y0,
+          x1,
+          y1,
+          operator: op,
+          clip: gs.clip ? { ...gs.clip } : null,
+          mirrored: determinant(gs.ctm) < 0,
+        });
+      }
+      if (FILL_OPS.has(op)) {
+        for (const sp of subpaths) {
+          const r = asAxisAlignedRect(sp);
+          if (r) acc.filledRects.push(r);
+        }
       }
     }
     subpaths = [];
@@ -1115,7 +1183,13 @@ function interpret(
     }
     // Render mode 3 is invisible and mode 7 is clip-only; neither puts ink down.
     if (gs.renderMode !== 3 && gs.renderMode !== 7 && text.length > 0) {
-      acc.paintedExtents.push({ kind: "text", ...box, operator: "Tj" });
+      acc.paintedExtents.push({
+        kind: "text",
+        ...box,
+        operator: "Tj",
+        clip: gs.clip ? { ...gs.clip } : null,
+        mirrored: determinant(trm) < 0,
+      });
     }
     tm = mul([1, 0, 0, 1, advance, 0], tm);
   };
@@ -1198,8 +1272,13 @@ function interpret(
         paintPath(op);
         break;
       case "n":
-        // No-op painting: this is the `W n` clip idiom. Nothing is inked.
-        subpaths = [];
+        // No-op painting: this is the `W n` clip idiom. Nothing is inked, but
+        // the clip it arms has to be recorded.
+        paintPath("n");
+        break;
+      case "W":
+      case "W*":
+        pendingClip = true;
         break;
 
       case "g":
@@ -1347,7 +1426,16 @@ function interpret(
           const y0 = Math.min(...ys);
           const x1 = Math.max(...xs);
           const y1 = Math.max(...ys);
-          acc.paintedExtents.push({ kind: "image", x0, y0, x1, y1, operator: "Do" });
+          acc.paintedExtents.push({
+            kind: "image",
+            x0,
+            y0,
+            x1,
+            y1,
+            operator: "Do",
+            clip: gs.clip ? { ...gs.clip } : null,
+            mirrored: determinant(gs.ctm) < 0,
+          });
           const pw = numberValue(xobj.dict.lookup(PDFName.of("Width"))) ?? 0;
           const ph = numberValue(xobj.dict.lookup(PDFName.of("Height"))) ?? 0;
           const wPt = x1 - x0;
@@ -1440,9 +1528,137 @@ function toReadingOrder(runs: readonly PdfTextRun[]): string[] {
     }
   }
   lines.sort((a, b) => b.y - a.y);
-  return lines.map((l) =>
-    [...l.runs].sort((a, b) => a.xPt - b.xPt).map((r) => r.text).join(" "),
+  return lines.map((l) => joinLine([...l.runs].sort((a, b) => a.xPt - b.xPt)));
+}
+
+/**
+ * Join the runs of one line into the string a reader would see.
+ *
+ * A separator is inserted ONLY where the pen actually jumped. Unconditionally
+ * joining with a space invents word boundaries: a designer who sets "TRIMMER"
+ * as two styled runs gets two adjacent show operators, and gluing them with a
+ * space produces "TRIM MER" — which then trips a whole-word search for the
+ * overlay term "TRIM" on perfectly good copy. The threshold is a quarter of the
+ * em, comfortably below the ~0.25–0.35 em a real space glyph occupies in the
+ * shipped faces and comfortably above the 0 gap between abutting runs.
+ */
+const RUN_GAP_SPACE_EM = 0.25;
+
+function joinLine(runs: readonly PdfTextRun[]): string {
+  let out = "";
+  let prevEnd: number | null = null;
+  let prevSize = 0;
+  for (const run of runs) {
+    if (prevEnd !== null) {
+      const gap = run.boxPt.x0 - prevEnd;
+      const em = Math.max(run.fontSizePt, prevSize, 1);
+      if (gap > em * RUN_GAP_SPACE_EM) out += " ";
+    }
+    out += run.text;
+    prevEnd = run.boxPt.x1;
+    prevSize = run.fontSizePt;
+  }
+  return out;
+}
+
+/* ----------------------------------------------------------- annotations */
+
+/** Annotation flag bits (PDF 32000-1 Table 165), 1-based as the spec numbers them. */
+const ANNOT_FLAG_HIDDEN = 1 << 1; // bit 2
+const ANNOT_FLAG_PRINT = 1 << 2; // bit 3
+const ANNOT_FLAG_NOVIEW = 1 << 5; // bit 6
+
+/** Pull the text out of an annotation's normal appearance stream. */
+function appearanceText(
+  doc: PDFDocument,
+  annot: PDFDict,
+  warnings: string[],
+): string {
+  const ap = annot.lookupMaybe(PDFName.of("AP"), PDFDict);
+  if (!ap) return "";
+  let normal = ap.lookupMaybe(PDFName.of("N"), PDFStream);
+  if (!normal) {
+    // /N may be a dictionary of appearance states; any of them can print.
+    const states = ap.lookupMaybe(PDFName.of("N"), PDFDict);
+    if (states) {
+      for (const key of states.keys()) {
+        const candidate = states.lookupMaybe(key, PDFStream);
+        if (candidate) {
+          normal = candidate;
+          break;
+        }
+      }
+    }
+  }
+  if (!normal) return "";
+
+  const acc: PageAccum = {
+    textRuns: [],
+    filledRects: [],
+    paintedExtents: [],
+    operatorCounts: {},
+    spaces: new Set<string>(),
+    imagePlacements: new Map<string, PdfImagePlacement[]>(),
+    warnings,
+    contentBytes: 0,
+  };
+  const initial: GState = {
+    ctm: [...IDENTITY] as Mat,
+    clip: null,
+    fillSpace: "DeviceGray",
+    strokeSpace: "DeviceGray",
+    font: null,
+    fontResourceName: "",
+    fontSize: 0,
+    charSpacing: 0,
+    wordSpacing: 0,
+    hScale: 1,
+    leading: 0,
+    rise: 0,
+    renderMode: 0,
+  };
+  interpret(
+    streamBytes(normal, warnings),
+    normal.dict.lookupMaybe(PDFName.of("Resources"), PDFDict),
+    new Map<string, FontModel>(),
+    initial,
+    acc,
+    doc,
+    0,
   );
+  return toReadingOrder(acc.textRuns).join("\n");
+}
+
+function readAnnotations(
+  doc: PDFDocument,
+  node: { lookupMaybe: (n: PDFName, t: typeof PDFArray) => PDFArray | undefined },
+  warnings: string[],
+): PdfAnnotationInfo[] {
+  const arr = node.lookupMaybe(PDFName.of("Annots"), PDFArray);
+  if (!arr) return [];
+  const out: PdfAnnotationInfo[] = [];
+  for (let i = 0; i < arr.size(); i += 1) {
+    const annot = arr.lookupMaybe(i, PDFDict);
+    if (!annot) continue;
+    const box = toBox(
+      annot.lookupMaybe(PDFName.of("Rect"), PDFArray),
+      `annotation ${i + 1} /Rect`,
+      warnings,
+    );
+    const flags = numberValue(annot.lookup(PDFName.of("F"))) ?? 0;
+    out.push({
+      subtype: nameValue(annot.lookup(PDFName.of("Subtype"))) ?? "",
+      rect: box ? { x: box.x, y: box.y, width: box.width, height: box.height } : null,
+      flags,
+      printable:
+        (flags & ANNOT_FLAG_PRINT) !== 0 &&
+        (flags & ANNOT_FLAG_HIDDEN) === 0 &&
+        (flags & ANNOT_FLAG_NOVIEW) === 0,
+      contents: stringValue(annot.lookup(PDFName.of("Contents"))) ?? "",
+      appearanceText: appearanceText(doc, annot, warnings),
+    });
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------ page walk */
@@ -1480,13 +1696,19 @@ function inspectPage(
   // formed files, which we would rather report than silently mis-parse.
   const contents = node.Contents();
   const chunks: Uint8Array[] = [];
+  let contentReadable = true;
   if (contents instanceof PDFArray) {
     for (let i = 0; i < contents.size(); i += 1) {
       const s = contents.lookupMaybe(i, PDFStream);
-      if (s) chunks.push(streamBytes(s, pageWarnings));
+      if (!s) continue;
+      const decoded = decodeStream(s, pageWarnings);
+      contentReadable &&= decoded.ok;
+      chunks.push(decoded.bytes);
     }
   } else if (contents instanceof PDFStream) {
-    chunks.push(streamBytes(contents, pageWarnings));
+    const decoded = decodeStream(contents, pageWarnings);
+    contentReadable = decoded.ok;
+    chunks.push(decoded.bytes);
   }
   let total = 0;
   for (const c of chunks) total += c.length + 1;
@@ -1513,6 +1735,7 @@ function inspectPage(
   const fontCache = new Map<string, FontModel>();
   const initial: GState = {
     ctm: [...IDENTITY] as Mat,
+    clip: null,
     fillSpace: "DeviceGray",
     strokeSpace: "DeviceGray",
     font: null,
@@ -1599,6 +1822,8 @@ function inspectPage(
     }
   }
 
+  const annotations = readAnnotations(doc, node, pageWarnings);
+
   const textLines = toReadingOrder(acc.textRuns);
 
   const barLike = acc.filledRects.filter(
@@ -1627,6 +1852,8 @@ function inspectPage(
     paintedExtents: acc.paintedExtents,
     paintedBounds: bounds,
     contentBytes: acc.contentBytes,
+    contentReadable,
+    annotations,
     warnings: pageWarnings,
   };
 }

@@ -860,3 +860,196 @@ describe("preflight — report shape", () => {
     expect(codes(report).length).toBe(report.findings.length);
   });
 });
+
+/* --------------------------------------------------------------------------
+ * Regressions found by the adversarial review. Each of these fired — or failed
+ * to fire — on artwork that was correct, which is the failure mode that trains
+ * an operator to stop reading the panel.
+ * ------------------------------------------------------------------------ */
+
+describe("preflight — regressions", () => {
+  /**
+   * `symbolBox` is the symbol box less the render's quiet zones, and for UPC-A
+   * the engine reports quietTop = quietBottom = 0 while the symbol's height
+   * includes the human-readable band. Treating that box as "the bars" made a
+   * caption sitting in the HRI band an error claiming it "changes the widths the
+   * scanner measures". It fired on this application's own master template.
+   */
+  describe("barcode quiet zone is measured from the bars, not the whole symbol box", () => {
+    const symbol = () =>
+      barcodeEl("bc", rect(1.2, 4.0, 1.6, 1.4), { value: VALID_UPC });
+
+    it("leaves a caption in the human-readable band alone", () => {
+      // The bars end 0.11 in above the bottom of the symbol box; this caption's
+      // ink sits in that band, below every bar and beside the check digit.
+      const caption = textEl("cap", rect(1.3, 5.09, 1.2, 0.09), "0 12345 67890 5", {
+        fontSize: 6_000_000,
+      });
+      const doc = makeDoc([], [symbol(), caption]);
+
+      const plan = planDocument({ doc, product: sampleProduct(), assets: new Map() }).back;
+      const bars = plan.ops[0];
+      const cap = plan.ops[1];
+      if (bars.op !== "barcode" || !bars.render || cap.op !== "text") throw new Error("fixture");
+      const barsBottom = bars.quietBox.y + Math.max(...bars.render.bars.map((b) => b.y + b.h));
+      // The fixture only proves anything if the caption is genuinely below the
+      // bars and genuinely inside the symbol box the old test region used.
+      expect(cap.inkBounds.y).toBeGreaterThan(barsBottom);
+      expect(cap.inkBounds.y).toBeLessThan(bars.symbolBox.y + bars.symbolBox.h);
+
+      expect(pick(run(doc), "BARCODE_QUIET_ZONE")).toEqual([]);
+    });
+
+    it("still catches a block painted over the bars themselves", () => {
+      const over = shapeEl("ov", rect(1.5, 4.3, 0.4, 0.3));
+      const found = pick(run(makeDoc([], [symbol(), over])), "BARCODE_QUIET_ZONE");
+      expect(found).toHaveLength(1);
+      expect(found[0].severity).toBe("error");
+      expect(found[0].title).toContain("over the bars");
+    });
+
+    it("still catches dark artwork in the left quiet zone at bar height", () => {
+      const blocker = shapeEl("bl", rect(1.15, 4.2, 0.08, 0.5));
+      expect(severityOf(run(makeDoc([], [symbol(), blocker])), "BARCODE_QUIET_ZONE")).toBe("error");
+    });
+
+    it("says nothing about dark artwork below the human-readable band", () => {
+      const footer = shapeEl("ft", rect(1.2, 5.45, 1.4, 0.1));
+      expect(pick(run(makeDoc([], [symbol(), footer])), "BARCODE_QUIET_ZONE")).toEqual([]);
+    });
+
+    it("measures the bar band, not the symbol box", () => {
+      const doc = makeDoc([], [symbol()]);
+      const plan = planDocument({ doc, product: sampleProduct(), assets: new Map() }).back;
+      const op = plan.ops[0];
+      expect(op.op).toBe("barcode");
+      if (op.op !== "barcode" || !op.render) throw new Error("no symbol");
+      // The gap the old test region wrongly claimed as bars.
+      const barsBottom = Math.max(...op.render.bars.map((b) => b.y + b.h));
+      expect(op.render.quietTop).toBe(0);
+      expect(op.render.quietBottom).toBe(0);
+      expect(op.quietBox.h - barsBottom).toBeGreaterThan(0);
+    });
+  });
+
+  /**
+   * `hideWhenEmpty` is a documented feature (§10). Every time it worked, the
+   * binding recorded EMPTY_VALUE and preflight graded it an error, so a template
+   * could not use conditional visibility without failing its own preflight.
+   */
+  describe("an element hidden by design is not a defect", () => {
+    const hidden = () =>
+      TextElementSchema.parse({
+        id: "opt",
+        kind: "text",
+        frame: rect(0.6, 1.0, 2, 0.3),
+        fontSize: 12_000_000,
+        paragraphs: [{ runs: [{ text: "", binding: { path: "subtitle", hideWhenEmpty: true } }] }],
+      }) as DesignElement;
+
+    it("reports hide-when-empty at info, not error", () => {
+      const report = run(makeDoc([hidden(), textEl("keep", rect(0.6, 0.4, 2, 0.3), "KEEP")]), {
+        product: sampleProduct({ subtitle: "" }),
+      });
+      const found = pick(report, "BINDING_UNRESOLVED");
+      expect(found).toHaveLength(1);
+      expect(found[0].severity).toBe("info");
+      expect(found[0].measurements?.hiddenReason).toBe("empty-binding");
+      expect(report.counts.error).toBe(0);
+      expect(report.exportable).toBe(true);
+    });
+
+    it("still errors when the same field is empty on an element that does print", () => {
+      const showing = boundTextEl("shown", rect(0.6, 1.0, 2, 0.3), "subtitle");
+      const report = run(makeDoc([showing, textEl("keep", rect(0.6, 0.4, 2, 0.3), "KEEP")]), {
+        product: sampleProduct({ subtitle: "" }),
+      });
+      expect(severityOf(report, "BINDING_UNRESOLVED")).toBe("error");
+    });
+  });
+
+  /**
+   * Both of these thresholds exist in two places. Reading only one made the
+   * other a control that silently did nothing — and the organisation's total
+   * area coverage limit is the one the seed writes into org settings.
+   */
+  describe("duplicated thresholds are both honoured", () => {
+    it("enforces the organisation's total ink limit when it is tighter than the profile's", () => {
+      const doc = makeDoc([shapeEl("blob", rect(1.0, 0.4, 1.0, 0.4), cmykPct(70, 60, 60, 80))]);
+      // 270 % — under the profile's 300 %, over the organisation's 240 %.
+      expect(pick(run(doc), "INK_LIMIT")).toEqual([]);
+      const strict = run(doc, {
+        blackRules: BlackRulesSchema.parse({ totalAreaCoverageLimit: 2_400 }),
+      });
+      const found = pick(strict, "INK_LIMIT");
+      expect(found).toHaveLength(1);
+      expect(found[0].measurements?.limit).toBe(2_400);
+      expect(found[0].detail).toContain("black rules");
+    });
+
+    it("enforces the profile's rich-black size threshold when it is stricter", () => {
+      const doc = makeDoc([
+        textEl("t", rect(0.6, 1.0, 3, 0.3), "BIG RICH BLACK", {
+          fontSize: 20_000_000,
+          color: DEFAULT_RICH_BLACK,
+        }),
+      ]);
+      expect(pick(run(doc), "RICH_BLACK_SMALL_TEXT")).toEqual([]);
+      const strict = run(doc, {
+        profile: PreflightProfileSchema.parse({ richBlackMinTextSize: 30_000_000 }),
+      });
+      const found = pick(strict, "RICH_BLACK_SMALL_TEXT");
+      expect(found).toHaveLength(1);
+      expect(found[0].measurements?.minimumPt).toBe(30);
+    });
+  });
+
+  /**
+   * `custom.*` and `translations.*` are open record maps on ProductContext, and
+   * `isBindablePath()` exists to let a template bind into them. Reporting them as
+   * BINDING_UNKNOWN_PATH told the operator "nothing will ever resolve there for
+   * any product" — false — and sent them to fix a template that was correct. It
+   * fired four times per card on the shipped master template.
+   */
+  describe("free-form namespaces are product data, not template typos", () => {
+    it("reports a missing translation against the product record", () => {
+      const el = boundTextEl("ml", rect(0.6, 1.0, 3, 0.3), "translations.es.productName");
+      const report = run(makeDoc([el, textEl("keep", rect(0.6, 0.4, 2, 0.3), "KEEP")]));
+      expect(pick(report, "BINDING_UNKNOWN_PATH")).toEqual([]);
+      const found = pick(report, "PRODUCT_FIELD_MISSING");
+      expect(found).toHaveLength(1);
+      expect(found[0].measurements?.namespace).toBe("translations.");
+      expect(found[0].detail).not.toContain("Nothing will ever resolve");
+    });
+
+    it("resolves the same path for a product that carries it", () => {
+      const el = boundTextEl("ml", rect(0.6, 1.0, 3, 0.3), "translations.es.productName");
+      const report = run(makeDoc([el]), {
+        product: sampleProduct({ translations: { es: { productName: "JUEGO DE COJINETES" } } }),
+      });
+      expect(pick(report, "PRODUCT_FIELD_MISSING")).toEqual([]);
+      expect(pick(report, "BINDING_UNKNOWN_PATH")).toEqual([]);
+    });
+
+    it("still calls a path under a closed object an unknown path", () => {
+      const el = boundTextEl("bn", rect(0.6, 1.0, 3, 0.3), "brand.nickname");
+      const report = run(makeDoc([el, textEl("keep", rect(0.6, 0.4, 2, 0.3), "KEEP")]));
+      expect(severityOf(report, "BINDING_UNKNOWN_PATH")).toBe("error");
+      expect(pick(report, "PRODUCT_FIELD_MISSING")).toEqual([]);
+    });
+  });
+
+  /** A run set in `none` puts nothing on a plate, whatever its span count says. */
+  it("does not count text with no printing colour as content", () => {
+    const invisible = textEl("t", rect(1, 1, 2, 0.3), "INVISIBLE", {
+      color: { space: "none" },
+    });
+    expect(severityOf(run(makeDoc([invisible])), "DOC_EMPTY_SIDE")).toBe("error");
+  });
+
+  /** The report is stored and compared; only `ranAt` may differ between runs. */
+  it("returns identical findings for identical input", () => {
+    const doc = makeDoc([textEl("t", rect(0.15, 3, 2, 0.3), "OUTSIDE SAFE")]);
+    expect(JSON.stringify(run(doc).findings)).toBe(JSON.stringify(run(doc).findings));
+  });
+});

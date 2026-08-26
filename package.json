@@ -18,7 +18,8 @@
     "fonts:metrics": "tsx scripts/gen-font-metrics.ts",
     "import:workbook": "tsx --env-file-if-exists=.env.local scripts/import-workbook.ts",
     "seed:benchmark": "tsx --env-file-if-exists=.env.local scripts/seed-benchmark.ts",
-    "seed:assets": "tsx --env-file-if-exists=.env.local scripts/seed-assets.ts"
+    "seed:assets": "tsx --env-file-if-exists=.env.local scripts/seed-assets.ts",
+    "bootstrap": "tsx scripts/bootstrap-remote.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",

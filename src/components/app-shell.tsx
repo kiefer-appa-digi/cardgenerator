@@ -10,6 +10,8 @@ import {
   Package,
   Ruler,
   Settings,
+  Layers,
+  PackageCheck,
   Upload,
 } from "lucide-react";
 import { BrandLogo } from "@/components/brand-logo";
@@ -32,7 +34,8 @@ const NAV: NavItem[] = [
   { href: "/templates", label: "Templates", icon: LayoutTemplate },
   { href: "/presets", label: "Dielines", icon: Ruler },
   { href: "/imports", label: "Import", icon: Upload },
-  { href: "/exports", label: "Exports", icon: FileStack },
+  { href: "/batch", label: "Batch", icon: Layers },
+  { href: "/exports", label: "Exports", icon: PackageCheck },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 

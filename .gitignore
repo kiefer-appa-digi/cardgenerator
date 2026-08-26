@@ -50,3 +50,6 @@ next-env.d.ts
 /test-results/
 /playwright-report/
 /.vercel
+/.data/
+/artifacts/pdf/
+/*.mjs

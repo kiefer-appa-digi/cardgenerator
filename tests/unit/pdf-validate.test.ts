@@ -5,6 +5,8 @@ import {
   PDFDict,
   PDFDocument,
   PDFName,
+  PDFNumber,
+  PDFString,
   StandardFonts,
   rgb,
 } from "pdf-lib";
@@ -69,6 +71,9 @@ type FixtureOptions = {
   imageAssetId?: string;
   /** Placed size of the image, inches. */
   imageSizeIn?: number;
+  /** Placed size of the image, inches, when it is not square. */
+  imageFrameIn?: { w: number; h: number };
+  imageFit?: "fill" | "fit" | "crop" | "stretch";
   overlayText?: string;
 };
 
@@ -117,14 +122,17 @@ function fixtureDoc(presetCode: PresetCode, opts: FixtureOptions = {}): DesignDo
 
   if (opts.imageAssetId) {
     const size = IN(opts.imageSizeIn ?? 1);
+    const frame = opts.imageFrameIn
+      ? { w: IN(opts.imageFrameIn.w), h: IN(opts.imageFrameIn.h) }
+      : { w: size, h: size };
     front.push(
       el({
         kind: "image",
         id: "photo",
         name: "Photo",
-        frame: { x: IN(0.4), y: IN(2), w: size, h: size },
+        frame: { x: IN(0.4), y: IN(2), w: frame.w, h: frame.h },
         assetId: opts.imageAssetId,
-        fit: "stretch",
+        fit: opts.imageFit ?? "stretch",
       }),
     );
   }
@@ -153,15 +161,16 @@ type Exported = {
 };
 
 /** Grayscale JPEGs, so an image fixture does not also trip the RGB check. */
-const jpegCache = new Map<number, Uint8Array>();
+const jpegCache = new Map<string, Uint8Array>();
 
-async function grayJpeg(pixels: number): Promise<Uint8Array> {
-  const hit = jpegCache.get(pixels);
+async function grayJpeg(pixels: number, tall = pixels): Promise<Uint8Array> {
+  const key = `${pixels}x${tall}`;
+  const hit = jpegCache.get(key);
   if (hit) return hit;
   const buf = await sharp({
     create: {
       width: pixels,
-      height: pixels,
+      height: tall,
       channels: 3,
       background: { r: 120, g: 120, b: 120 },
     },
@@ -174,13 +183,13 @@ async function grayJpeg(pixels: number): Promise<Uint8Array> {
     .jpeg({ quality: 70 })
     .toBuffer();
   const bytes = new Uint8Array(buf);
-  jpegCache.set(pixels, bytes);
+  jpegCache.set(key, bytes);
   return bytes;
 }
 
 async function exportFixture(
   presetCode: PresetCode,
-  opts: FixtureOptions & { imagePixels?: number } = {},
+  opts: FixtureOptions & { imagePixels?: number; imagePixelsTall?: number } = {},
 ): Promise<Exported> {
   const doc = fixtureDoc(presetCode, opts);
   const assets = new Map<string, AssetInfo>();
@@ -188,11 +197,12 @@ async function exportFixture(
 
   if (opts.imageAssetId) {
     const px = opts.imagePixels ?? 900;
-    const jpeg = await grayJpeg(px);
+    const py = opts.imagePixelsTall ?? px;
+    const jpeg = await grayJpeg(px, py);
     assets.set(opts.imageAssetId, {
       id: opts.imageAssetId,
       pixelWidth: px,
-      pixelHeight: px,
+      pixelHeight: py,
       colorSpace: "gray",
       contentType: "image/jpeg",
     });
@@ -368,7 +378,7 @@ describe("validateProductionPdf on a good export", () => {
     expect(c.measurements.worstDeviationPt).toBeLessThanOrEqual(BOX_TOLERANCE_PT);
     expect(c.pageResults).toHaveLength(2);
     // A perfect file still has to state a number, not "nothing was measured".
-    expect(c.measured).toBe("worst deviation 0 pt of 8 box edges (page 1 MediaBox)");
+    expect(c.measured).toBe("worst deviation 0 pt of 8 boxes (page 1 MediaBox)");
   });
 
   it("reports physical dimensions to five decimal places of an inch", () => {

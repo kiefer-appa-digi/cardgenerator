@@ -48,6 +48,28 @@ function nearestPaths(path: string): string[] {
 }
 
 /**
+ * OPEN NAMESPACES — paths whose absence is data, not a typo.
+ *
+ * `ProductContext` closes most of its shape, but `custom` and `translations`
+ * are `z.record(...)` maps (lib/data/context.ts): the importer's free-form
+ * columns and per-language copy. `isKnownPath()` only matches exact catalogue
+ * entries, so a path inside one of these is "unknown" whenever *this* product
+ * happens not to carry it — even though the next SKU may carry it perfectly
+ * well and `isBindablePath()` is written specifically to allow that.
+ *
+ * Treating those as BINDING_UNKNOWN_PATH told the operator "nothing will ever
+ * resolve there for any product" — which is false — and sent them to repair a
+ * template that is correct. They are missing product data, and are reported as
+ * such. `brand.nickname` and friends stay unknown paths: `brand` is a closed
+ * object, so nothing can ever appear under it.
+ */
+const OPEN_NAMESPACES = ["custom.", "translations."] as const;
+
+function isOpenNamespacePath(path: string): boolean {
+  return OPEN_NAMESPACES.some((ns) => path.startsWith(ns) && path.length > ns.length);
+}
+
+/**
  * A missing product field and an unknown binding path are different failures
  * with different owners: one is fixed in the product record, the other in the
  * template. `bindingPreflightCode()` gives the base mapping; MISSING_VALUE is
@@ -56,6 +78,9 @@ function nearestPaths(path: string): string[] {
 function codeFor(issue: BindingIssue): CheckCode {
   const base = bindingPreflightCode(issue);
   if (base === "BINDING_UNRESOLVED" && issue.code === "MISSING_VALUE") return "PRODUCT_FIELD_MISSING";
+  if (base === "BINDING_UNKNOWN_PATH" && isOpenNamespacePath(issue.path)) {
+    return "PRODUCT_FIELD_MISSING";
+  }
   return base;
 }
 
@@ -125,13 +150,22 @@ export function checkBindings(ctx: PreflightContext): PreflightFinding[] {
       }
 
       if (code === "PRODUCT_FIELD_MISSING") {
+        const openNs = isOpenNamespacePath(issue.path);
+        const namespace = issue.path.slice(0, issue.path.indexOf(".") + 1);
         out.push(
           finding({
             code,
             severity,
-            title: `Product has no value for "${issue.path}"`,
+            title: openNs
+              ? `Product carries nothing at "${issue.path}"`
+              : `Product has no value for "${issue.path}"`,
             detail:
-              `${issue.detail} ` +
+              (openNs
+                ? `"${issue.path}" is in the free-form "${namespace}" namespace, which is not catalogued ` +
+                  `because its keys come from the imported data rather than from a fixed list. This ` +
+                  `product does not carry that key — another SKU may — so preflight cannot tell a ` +
+                  `product that is simply missing this entry from a template that misspelled the key. `
+                : `${issue.detail} `) +
               (!diag.visible
                 ? `The element is not on the card for this product (${diag.hiddenReason}), which is what the template asked for when the field is blank — recorded so the run manifest shows which SKUs dropped this slot.`
                 : draws
@@ -140,12 +174,18 @@ export function checkBindings(ctx: PreflightContext): PreflightFinding[] {
               ` Product "${ctx.product.partNumber || ctx.product.id || "(unidentified)"}".`,
             remedy: !diag.visible
               ? `No action needed if this SKU is meant to ship without "${issue.path}". If it is not, populate the field on the product record or give the binding a fallback.`
-              : `Populate "${issue.path}" on the product record, or give the binding a fallback so the template degrades predictably across the run.`,
+              : openNs
+                ? `Check the key against the imported data first — "${namespace}" keys are spelled by the ` +
+                  `import mapping, so a mismatch here is usually a mapping or casing difference. If the ` +
+                  `key is right, add the value to this product, or give the binding a fallback so every ` +
+                  `SKU in the run sets predictably.`
+                : `Populate "${issue.path}" on the product record, or give the binding a fallback so the template degrades predictably across the run.`,
             ...at(ctx, diag.elementId, diag.frame),
             measurements: {
               path: issue.path,
               drewContent: draws ? 1 : 0,
               hiddenReason: diag.visible ? "visible" : diag.hiddenReason,
+              namespace: openNs ? namespace : "catalogued",
             },
           }),
         );

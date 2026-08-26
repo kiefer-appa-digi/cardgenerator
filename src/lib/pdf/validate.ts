@@ -12,6 +12,8 @@ import {
   type PdfBox,
   type PdfFontInfo,
   type PdfInspection,
+  type PdfPageInspection,
+  type PdfPaintedExtent,
 } from "./inspect";
 
 /**
@@ -110,6 +112,7 @@ export const VALIDATION_CHECK_IDS = [
   "PAGE_COUNT",
   "PAGE_BOXES",
   "PHYSICAL_DIMENSIONS",
+  "PAGE_ORIENTATION",
   "FONT_EMBEDDING",
   "COLOR_SPACES",
   "IMAGE_RESOLUTION",
@@ -189,6 +192,8 @@ export type PdfExpectation = {
   barcodes: ExpectedBarcode[];
   minImageDpi: number;
   forbiddenText: readonly string[];
+  /** Page /Rotate every page must carry. 0 for every card this system exports. */
+  expectedRotation: number;
   boxTolerancePt: number;
   clipTolerancePt: number;
 };
@@ -225,6 +230,7 @@ export type ExpectationOptions = {
   barcodes?: ExpectedBarcode[];
   minImageDpi?: number;
   forbiddenText?: readonly string[];
+  expectedRotation?: number;
   boxTolerancePt?: number;
   clipTolerancePt?: number;
 };
@@ -273,6 +279,7 @@ export function expectationForPreset(
     barcodes: opts.barcodes ?? [],
     minImageDpi: opts.minImageDpi ?? DEFAULT_MIN_IMAGE_DPI,
     forbiddenText: opts.forbiddenText ?? EDITOR_OVERLAY_WORDS,
+    expectedRotation: opts.expectedRotation ?? 0,
     boxTolerancePt: opts.boxTolerancePt ?? BOX_TOLERANCE_PT,
     clipTolerancePt: opts.clipTolerancePt ?? CLIP_TOLERANCE_PT,
   };
@@ -425,6 +432,79 @@ function statusOf(results: ValidationPageResult[]): ValidationStatus {
   return "pass";
 }
 
+/**
+ * The page result an absence check must return when the page could not be read.
+ *
+ * "No overlay words found" on a page whose content stream did not decode is a
+ * statement about the parser, not about the file. Reporting it as a pass is
+ * exactly the unearned compliance claim §32 forbids, so an unreadable page
+ * fails every check that works by asserting something is NOT there.
+ */
+function unreadableResult(
+  page: PdfPageInspection,
+  index: number,
+  what: string,
+): ValidationPageResult {
+  return {
+    page: index + 1,
+    side: sideOfPage(index),
+    status: "fail",
+    measured: "page content could not be decoded",
+    detail:
+      `At least one of this page's content streams could not be decompressed ` +
+      `(${page.warnings.join("; ") || "no reason recorded"}), so ${what} cannot be ` +
+      `established. An unreadable page is not a clean page.`,
+  };
+}
+
+/** Effective page size after /Rotate, which is what the press actually images. */
+function rotatedSize(box: PdfBox, rotation: number): { width: number; height: number } {
+  const norm = ((Math.round(rotation / 90) * 90) % 360 + 360) % 360;
+  return norm === 90 || norm === 270
+    ? { width: box.height, height: box.width }
+    : { width: box.width, height: box.height };
+}
+
+function normaliseRotation(rotation: number): number {
+  return ((Math.round(rotation) % 360) + 360) % 360;
+}
+
+/**
+ * The extent that actually reaches the sheet, in device space.
+ *
+ * A clip path SMALLER than the page is authored intent: it is how a cropped
+ * image is expressed, and `fit: "fill"` — the default for every image element —
+ * always places the full raster on an enlarged rect and clips it to the frame.
+ * Measuring the raw operator coordinates there would fail every card with a
+ * cropped background photo, which is most of them.
+ *
+ * A clip that is the page (or larger) carries no crop intent — it is the
+ * exporter's guard rail — so it is ignored and the raw extent is measured. That
+ * is what keeps "an element was dragged off the artboard" a failure.
+ */
+function effectiveExtent(
+  e: PdfPaintedExtent,
+  media: PdfBox,
+): { x0: number; y0: number; x1: number; y1: number; cropped: boolean } {
+  const mx1 = media.x + media.width;
+  const my1 = media.y + media.height;
+  const c = e.clip;
+  const authored =
+    c !== null &&
+    (c.x0 > media.x + BOX_TOLERANCE_PT ||
+      c.y0 > media.y + BOX_TOLERANCE_PT ||
+      c.x1 < mx1 - BOX_TOLERANCE_PT ||
+      c.y1 < my1 - BOX_TOLERANCE_PT);
+  if (!authored || !c) return { x0: e.x0, y0: e.y0, x1: e.x1, y1: e.y1, cropped: false };
+  return {
+    x0: Math.max(e.x0, c.x0),
+    y0: Math.max(e.y0, c.y0),
+    x1: Math.min(e.x1, c.x1),
+    y1: Math.min(e.y1, c.y1),
+    cropped: true,
+  };
+}
+
 function sideOfPage(index: number): SideKey | null {
   if (index === 0) return "front";
   if (index === 1) return "back";
@@ -539,7 +619,7 @@ function checkPageBoxes(insp: PdfInspection, exp: PdfExpectation): ValidationChe
     title: "MediaBox / CropBox / BleedBox / TrimBox",
     status,
     measured: anyBoxMeasured
-      ? `worst deviation ${fmtPt(worstDelta)} of ${insp.pages.length * 4} box edges (${worstLabel})`
+      ? `worst deviation ${fmtPt(worstDelta)} of ${insp.pages.length * 4} boxes (${worstLabel})`
       : "no boxes measured",
     expected: `every box within ±${fmtPt(tol)} of the ${exp.presetCode} geometry; no ArtBox`,
     tolerance: `±${fmtPt(tol)} per edge`,
@@ -564,8 +644,9 @@ function checkPhysicalDimensions(
   exp: PdfExpectation,
 ): ValidationCheck {
   const spec = SPEC_FULL_BLEED_IN[exp.presetCode];
-  // The 5-decimal report is the deliverable, so compare at that resolution:
-  // half a unit in the last reported place.
+  // Same tolerance as the box check, expressed in inches: 0.001 pt = 1.39e-5 in
+  // = 0.35 µm, still three orders of magnitude tighter than the smallest real
+  // error (0.001 in) and far finer than any imagesetter can address.
   const tolIn = exp.boxTolerancePt / PT_PER_IN;
   const results: ValidationPageResult[] = [];
 
@@ -581,19 +662,25 @@ function checkPhysicalDimensions(
       });
       return;
     }
-    const wIn = box.width / PT_PER_IN;
-    const hIn = box.height / PT_PER_IN;
+    // /Rotate is applied before the page is imaged, so a 90° page is physically
+    // height × width however the MediaBox is written. Measuring the raw box
+    // would report the size of a sheet that is never printed.
+    const size = rotatedSize(box, page.rotation);
+    const rotated = normaliseRotation(page.rotation) !== 0;
+    const wIn = size.width / PT_PER_IN;
+    const hIn = size.height / PT_PER_IN;
     const dw = Math.abs(wIn - spec.widthIn);
     const dh = Math.abs(hIn - spec.heightIn);
     const ok = dw <= tolIn && dh <= tolIn;
+    const rotNote = rotated ? ` after /Rotate ${normaliseRotation(page.rotation)}` : "";
     results.push({
       page: i + 1,
       side: sideOfPage(i),
       status: ok ? "pass" : "fail",
-      measured: `${wIn.toFixed(DIMENSION_DECIMALS)} × ${hIn.toFixed(DIMENSION_DECIMALS)} in (${fmtPt(box.width)} × ${fmtPt(box.height)})`,
+      measured: `${wIn.toFixed(DIMENSION_DECIMALS)} × ${hIn.toFixed(DIMENSION_DECIMALS)} in (${fmtPt(size.width)} × ${fmtPt(size.height)})${rotNote}`,
       detail: ok
         ? `Matches the spec §22 full-bleed size for ${exp.presetCode}.`
-        : `Expected ${spec.widthIn.toFixed(DIMENSION_DECIMALS)} × ${spec.heightIn.toFixed(DIMENSION_DECIMALS)} in; off by ${dw.toFixed(DIMENSION_DECIMALS)} in wide and ${dh.toFixed(DIMENSION_DECIMALS)} in tall.`,
+        : `Expected ${spec.widthIn.toFixed(DIMENSION_DECIMALS)} × ${spec.heightIn.toFixed(DIMENSION_DECIMALS)} in; off by ${dw.toFixed(DIMENSION_DECIMALS)} in wide and ${dh.toFixed(DIMENSION_DECIMALS)} in tall${rotNote}.`,
     });
   });
 
@@ -608,7 +695,10 @@ function checkPhysicalDimensions(
   }
 
   const status = statusOf(results);
-  const first = insp.pages[0]?.boxes.mediaBox ?? null;
+  const firstPage = insp.pages[0];
+  const first = firstPage?.boxes.mediaBox
+    ? rotatedSize(firstPage.boxes.mediaBox, firstPage.rotation)
+    : null;
   return {
     id: "PHYSICAL_DIMENSIONS",
     title: "Physical dimensions",
@@ -631,6 +721,94 @@ function checkPhysicalDimensions(
       measuredWidthIn: first ? Number((first.width / PT_PER_IN).toFixed(DIMENSION_DECIMALS)) : "n/a",
       measuredHeightIn: first ? Number((first.height / PT_PER_IN).toFixed(DIMENSION_DECIMALS)) : "n/a",
       toleranceIn: Number(tolIn.toFixed(8)),
+    },
+    pageResults: results,
+  };
+}
+
+/**
+ * The card is the right way up and not mirrored.
+ *
+ * Two independent ways a correctly sized page still images wrong, neither of
+ * which any box measurement can see:
+ *
+ *  - /Rotate. A page entry of 180 prints the card upside down; 90 or 270 turns
+ *    a 4.6 × 7.4 in card into a 7.4 × 4.6 in one. The MediaBox is untouched in
+ *    both cases, so PAGE_BOXES is perfectly happy.
+ *  - A mirrored placement matrix. A y-flip applied to the whole content stream
+ *    — one `1 0 0 -1 0 h cm` — leaves every box, every colour and every glyph
+ *    in place while reversing the artwork. Its signature is a negative
+ *    determinant on the matrix that placed each mark.
+ *
+ * Only text and placed rasters are judged for mirroring: those are the marks
+ * that carry orientation. A rectangle drawn with a negative-determinant matrix
+ * is the same rectangle, so flagging it would be noise.
+ */
+function checkPageOrientation(insp: PdfInspection, exp: PdfExpectation): ValidationCheck {
+  const results: ValidationPageResult[] = [];
+  let worstRotation = 0;
+  let mirroredMarks = 0;
+
+  insp.pages.forEach((page, i) => {
+    const rotation = normaliseRotation(page.rotation);
+    const oriented = page.paintedExtents.filter((e) => e.kind === "text" || e.kind === "image");
+    const mirrored = oriented.filter((e) => e.mirrored);
+    mirroredMarks += mirrored.length;
+    if (rotation !== 0) worstRotation = rotation;
+
+    const problems: string[] = [];
+    if (rotation !== exp.expectedRotation) {
+      problems.push(
+        `/Rotate is ${rotation}°, not ${exp.expectedRotation}°. The RIP applies it before imaging, so the card comes off the press ${
+          rotation === 180 ? "upside down" : "turned on its side"
+        } even though every page box measures correctly.`,
+      );
+    }
+    if (mirrored.length > 0) {
+      const sample = mirrored[0];
+      problems.push(
+        `${mirrored.length} of ${oriented.length} oriented mark(s) are placed by a mirrored (negative-determinant) matrix — for example a ${sample.kind} at [${sample.x0.toFixed(2)}, ${sample.y0.toFixed(2)}]. Live text and placed rasters are never legitimately mirrored in production artwork; a whole page of them is a y-flip.`,
+      );
+    }
+
+    results.push({
+      page: i + 1,
+      side: sideOfPage(i),
+      status: problems.length === 0 ? "pass" : "fail",
+      measured: `/Rotate ${rotation}°, ${mirrored.length} of ${oriented.length} oriented mark(s) mirrored`,
+      detail:
+        problems.length === 0
+          ? "Upright and unmirrored: no page rotation, and every glyph and raster is placed by a matrix that preserves orientation."
+          : problems.join(" "),
+    });
+  });
+
+  if (results.length === 0) {
+    results.push({
+      page: 0,
+      side: null,
+      status: "fail",
+      measured: "no pages",
+      detail: "There are no pages whose orientation could be checked.",
+    });
+  }
+
+  const status = statusOf(results);
+  return {
+    id: "PAGE_ORIENTATION",
+    title: "Upright and unmirrored",
+    status,
+    measured: `/Rotate ${worstRotation}° worst of ${insp.pages.length} page(s); ${mirroredMarks} mirrored mark(s)`,
+    expected: `/Rotate ${exp.expectedRotation}° on every page; no mirrored text or raster`,
+    tolerance: "exact",
+    detail:
+      status === "pass"
+        ? `Neither a page rotation nor a mirrored placement matrix is present, so the top of the card is the top of the sheet. Page boxes cannot see either fault: /Rotate leaves the MediaBox alone and a y-flip leaves every coordinate inside the page.`
+        : results.filter((r) => r.status === "fail").map((r) => `Page ${r.page}: ${r.detail}`).join(" "),
+    measurements: {
+      expectedRotation: exp.expectedRotation,
+      rotations: insp.pages.map((p) => normaliseRotation(p.rotation)).join(", ") || "n/a",
+      mirroredMarks,
     },
     pageResults: results,
   };
@@ -734,10 +912,19 @@ function checkColorSpaces(insp: PdfInspection, exp: PdfExpectation): ValidationC
       images.add(s);
     }
   }
-  const isRgb = (s: string) => s === "DeviceRGB" || s === "ICCBased-RGB" || s === "CalRGB";
+  // An /Indexed space paints in its base, so "Indexed-DeviceRGB" is RGB ink on
+  // an RGB plate no matter how few entries the palette has.
+  const isRgb = (s: string) =>
+    s === "DeviceRGB" ||
+    s === "ICCBased-RGB" ||
+    s === "CalRGB" ||
+    s === "Indexed-DeviceRGB" ||
+    s === "Indexed-ICCBased-RGB" ||
+    s === "Indexed-CalRGB";
   const rgb = [...all].filter(isRgb);
 
   const results: ValidationPageResult[] = insp.pages.map((p, i) => {
+    if (!p.contentReadable) return unreadableResult(p, i, "which colour spaces are used");
     const spaces = [...new Set([...p.colorSpaces.spaces, ...p.colorSpaces.imageSpaces])].sort();
     const pageRgb = spaces.filter(isRgb);
     const bad = exp.requireCmykOnly && pageRgb.length > 0;
@@ -885,10 +1072,15 @@ function checkBarcodePresence(insp: PdfInspection, exp: PdfExpectation): Validat
     const needle = digitsOnly(bc.value);
     const pageIdxs =
       bc.page !== null ? [bc.page - 1] : insp.pages.map((_, i) => i);
+    // Match inside ONE line, not across the whole page: stripping non-digits
+    // from every line at once would let an unrelated part number on one line and
+    // a lot code on the next spell out a GTIN that is nowhere in the artwork.
+    // A UPC-A's human-readable groups all sit on one baseline, so this is no
+    // weaker for a real symbol.
     const hits = pageIdxs.filter((i) => {
       const page = insp.pages[i];
       if (!page) return false;
-      return digitsOnly(page.textContent).includes(needle);
+      return page.textLines.some((line) => digitsOnly(line).includes(needle));
     });
     const barPages = pageIdxs.filter((i) => (insp.pages[i]?.barLikeRectCount ?? 0) > 0);
 
@@ -945,21 +1137,70 @@ function checkNoEditorOverlays(insp: PdfInspection, exp: PdfExpectation): Valida
   const results: ValidationPageResult[] = [];
   const allHits: string[] = [];
 
+  let annotationHits = 0;
+
   insp.pages.forEach((page, i) => {
-    const hits = exp.forbiddenText.filter((w) => containsWord(page.textContent, w));
+    if (!page.contentReadable) {
+      results.push(unreadableResult(page, i, "the absence of overlay text"));
+      return;
+    }
+
+    // An annotation is not in the content stream but still prints. Every PDF/X
+    // part forbids one whose rectangle touches the bleed/trim area, and a
+    // review stamp or a dieline note is exactly the "editor overlay" §15A bars.
+    const artBox = page.boxes.bleedBox ?? page.boxes.mediaBox;
+    const printing = page.annotations.filter((a) => {
+      if (!a.printable) return false;
+      if (!a.rect || !artBox) return true;
+      return (
+        a.rect.x < artBox.x + artBox.width &&
+        a.rect.x + a.rect.width > artBox.x &&
+        a.rect.y < artBox.y + artBox.height &&
+        a.rect.y + a.rect.height > artBox.y
+      );
+    });
+    annotationHits += printing.length;
+
+    const annotText = page.annotations
+      .map((a) => `${a.contents}\n${a.appearanceText}`)
+      .join("\n");
+    const haystack = `${page.textContent}\n${annotText}`;
+    const hits = exp.forbiddenText.filter((w) => containsWord(haystack, w));
     for (const h of hits) allHits.push(`"${h}" on page ${i + 1}`);
+    if (printing.length > 0) {
+      allHits.push(`${printing.length} printable annotation(s) on page ${i + 1}`);
+    }
+
+    const bad = hits.length > 0 || printing.length > 0;
+    const parts: string[] = [];
+    if (hits.length > 0) {
+      parts.push(
+        `Overlay text reached press artwork. The extracted text is: "${haystack.replace(/\n/g, " / ").slice(0, 240)}".`,
+      );
+    }
+    if (printing.length > 0) {
+      parts.push(
+        `${printing.length} printable annotation(s) overlap the artwork: ${printing
+          .map((a) => `/${a.subtype || "?"}${a.contents ? ` "${a.contents.slice(0, 40)}"` : ""}`)
+          .join(", ")}. An annotation is not in the content stream, so it survives every check that only reads page content — and it still puts ink on the sheet.`,
+      );
+    }
+
     results.push({
       page: i + 1,
       side: sideOfPage(i),
-      status: hits.length === 0 ? "pass" : "fail",
-      measured:
-        hits.length === 0
-          ? `none of ${exp.forbiddenText.length} overlay words present`
-          : `found ${hits.map((h) => `"${h}"`).join(", ")}`,
-      detail:
-        hits.length === 0
-          ? `${page.textRuns.length} text run(s) scanned, none matching the overlay vocabulary.`
-          : `Overlay text reached press artwork. The extracted text is: "${page.textContent.replace(/\n/g, " / ").slice(0, 240)}".`,
+      status: bad ? "fail" : "pass",
+      measured: bad
+        ? [
+            hits.length > 0 ? `found ${hits.map((h) => `"${h}"`).join(", ")}` : "",
+            printing.length > 0 ? `${printing.length} printable annotation(s)` : "",
+          ]
+            .filter(Boolean)
+            .join("; ")
+        : `none of ${exp.forbiddenText.length} overlay words present; ${page.annotations.length} annotation(s), 0 printable over the artwork`,
+      detail: bad
+        ? parts.join(" ")
+        : `${page.textRuns.length} text run(s) and ${page.annotations.length} annotation(s) scanned, none matching the overlay vocabulary.`,
     });
   });
 
@@ -973,11 +1214,12 @@ function checkNoEditorOverlays(insp: PdfInspection, exp: PdfExpectation): Valida
     tolerance: "whole-word, case-insensitive",
     detail:
       status === "pass"
-        ? `Bleed, trim, safe-area, cavity and proof furniture are editor and proof-PDF concerns; a production file that names them is showing guides to the press. Matching is whole-word and case-insensitive, so ordinary copy containing "trimmer" or "safety" does not trip it.`
+        ? `Bleed, trim, safe-area, cavity and proof furniture are editor and proof-PDF concerns; a production file that names them is showing guides to the press. Page text, annotation notes and annotation appearance streams are all scanned, and any annotation that would print over the artwork fails on its own. Matching is whole-word and case-insensitive against text joined the way a reader sees it, so ordinary copy containing "trimmer" or "safety" does not trip it.`
         : `Editor overlay text is present: ${allHits.join(", ")}. A production PDF must contain artwork only.`,
     measurements: {
       forbiddenWords: exp.forbiddenText.join(", "),
       hits: allHits.length,
+      printableAnnotations: annotationHits,
     },
     pageResults: results,
   };
@@ -1001,18 +1243,27 @@ function checkNoClipping(insp: PdfInspection, exp: PdfExpectation): ValidationCh
       });
       return;
     }
+    if (!page.contentReadable) {
+      results.push(unreadableResult(page, i, "where the ink lands"));
+      return;
+    }
     const x1 = box.x + box.width;
     const y1 = box.y + box.height;
     // Overhang is signed: content strictly inside the page gives a negative
     // value, which is the margin. Only a positive overhang is a defect.
     let pageWorst = Number.NEGATIVE_INFINITY;
+    let croppedMarks = 0;
     const offenders: string[] = [];
     for (const e of page.paintedExtents) {
-      const over = Math.max(box.x - e.x0, box.y - e.y0, e.x1 - x1, e.y1 - y1);
+      const v = effectiveExtent(e, box);
+      if (v.cropped) croppedMarks += 1;
+      // A mark whose authored crop leaves nothing visible paints no ink at all.
+      if (v.x1 <= v.x0 || v.y1 <= v.y0) continue;
+      const over = Math.max(box.x - v.x0, box.y - v.y0, v.x1 - x1, v.y1 - y1);
       if (over > pageWorst) pageWorst = over;
       if (over > tol) {
         offenders.push(
-          `a ${e.kind} painted by "${e.operator}" reaches [${e.x0.toFixed(3)}, ${e.y0.toFixed(3)}, ${e.x1.toFixed(3)}, ${e.y1.toFixed(3)}] pt, ${fmtPt(over)} outside`,
+          `a ${e.kind} painted by "${e.operator}" reaches [${v.x0.toFixed(3)}, ${v.y0.toFixed(3)}, ${v.x1.toFixed(3)}, ${v.y1.toFixed(3)}] pt, ${fmtPt(over)} outside`,
         );
       }
     }
@@ -1029,7 +1280,11 @@ function checkNoClipping(insp: PdfInspection, exp: PdfExpectation): ValidationCh
       measured: `${page.paintedExtents.length} painted mark(s); furthest overhang ${fmtPt(Math.max(0, pageWorst))}`,
       detail: bad
         ? `Content is being clipped away by the page: ${offenders.slice(-3).join("; ")}. MediaBox is ${describeBox(box)}.`
-        : `Everything painted lies inside the MediaBox ${describeBox(box)}; content bounds are ${
+        : `Everything painted lies inside the MediaBox ${describeBox(box)}${
+            croppedMarks > 0
+              ? ` (${croppedMarks} mark(s) measured through their own crop, which is how a "fill"/"crop" image is expressed and is not the page clipping anything)`
+              : ""
+          }; content bounds are ${
             page.paintedBounds
               ? `[${page.paintedBounds.x0.toFixed(3)}, ${page.paintedBounds.y0.toFixed(3)}, ${page.paintedBounds.x1.toFixed(3)}, ${page.paintedBounds.y1.toFixed(3)}] pt`
               : "empty"
@@ -1059,7 +1314,7 @@ function checkNoClipping(insp: PdfInspection, exp: PdfExpectation): ValidationCh
     tolerance: `±${fmtPt(tol)} overhang`,
     detail:
       status === "pass"
-        ? `Path points, image placements and text em-boxes were transformed through the CTM and compared with the MediaBox. Full-bleed artwork sits exactly on the page edge at 0 overhang; the ${fmtPt(tol)} allowance exists because a text extent is reconstructed as an em-box from the font's ascent and descent and a stroke is measured on its centreline.`
+        ? `Path points, image placements and text em-boxes were transformed through the CTM and compared with the MediaBox, after intersecting each mark with any clip path smaller than the page — that clip is how a cropped or "fill"-fitted image is written, and measuring the raw operator coordinates there would condemn every card with a cropped background photo. Full-bleed artwork sits exactly on the page edge at 0 overhang; the ${fmtPt(tol)} allowance exists because a text extent is reconstructed as an em-box from the font's ascent and descent and a stroke is measured on its centreline.`
         : results.filter((r) => r.status === "fail").map((r) => `Page ${r.page}: ${r.detail}`).join(" "),
     measurements: {
       worstOverhangPt: Number(Math.max(0, Number.isFinite(worst) ? worst : 0).toFixed(6)),
@@ -1074,8 +1329,9 @@ function checkNoClipping(insp: PdfInspection, exp: PdfExpectation): ValidationCh
 
 const COMPLIANCE_NOTE =
   "This report verifies PDF structure: page count, page boxes, physical size, " +
-  "font embedding, colour-space operators, image resolution metadata, barcode " +
-  "presence, absence of editor overlays and absence of clipping. It is NOT a " +
+  "page rotation and mirroring, font embedding, colour-space operators, image " +
+  "resolution metadata, barcode presence, absence of editor overlays (page " +
+  "content and annotations) and absence of clipping. It is NOT a " +
   "PDF/X conformance test — it does not evaluate ICC transforms, XMP metadata or " +
   "ISO 15930 rules, and it never asserts PDF/X conformance. Certified output " +
   "requires a preflight engine such as veraPDF, callas pdfToolbox or Acrobat " +
@@ -1096,6 +1352,7 @@ export async function validateProductionPdf(
     checkPageCount(inspection, expectation),
     checkPageBoxes(inspection, expectation),
     checkPhysicalDimensions(inspection, expectation),
+    checkPageOrientation(inspection, expectation),
     checkFontEmbedding(inspection, expectation),
     checkColorSpaces(inspection, expectation),
     checkImageResolution(inspection, expectation),
@@ -1192,7 +1449,10 @@ export function formatValidationReport(report: PdfValidationReport): string {
   out.push(rule);
   out.push("PAGE GEOMETRY");
   for (const p of report.inspection.pages) {
-    out.push(`  page ${p.index + 1}`);
+    out.push(
+      `  page ${p.index + 1}   /Rotate ${p.rotation}   ${p.annotations.length} annotation(s)` +
+        `${p.contentReadable ? "" : "   CONTENT NOT DECODABLE"}`,
+    );
     for (const [label, box] of [
       ["MediaBox", p.boxes.mediaBox],
       ["CropBox", p.boxes.cropBox],
