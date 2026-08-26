@@ -1,5 +1,5 @@
 import type { BarcodeError } from "./types";
-import { GTIN_LENGTHS, normaliseGtin, type GtinResult } from "./gtin";
+import { GTIN_LENGTHS, isDigits, normaliseGtin, type GtinResult } from "./gtin";
 
 /**
  * UPC-A and EAN-13 encodation — spec §12, GS1 General Specifications §5.2.
@@ -102,6 +102,24 @@ function digitAt(digits: string, i: number): number {
   return digits.charCodeAt(i) - 48;
 }
 
+/**
+ * Precondition guard for the two encoders below.
+ *
+ * These take a value that a `normalise*` call has already vetted, so reaching
+ * here with anything else is a programming error, not a data error — and the
+ * cost of not saying so is a symbol built out of `undefined`: before this
+ * guard, `encodeUpcA("12345")` returned a 109-module "pattern" containing the
+ * literal text "undefined" and reported it as a valid symbol. A thrown error
+ * cannot be mistaken for a barcode; a corrupted pattern can.
+ */
+function assertGtinDigits(digits: string, length: number, symbology: string): void {
+  if (digits.length !== length || !isDigits(digits)) {
+    throw new RangeError(
+      `${symbology} needs ${length} validated digits; received ${JSON.stringify(digits)}`,
+    );
+  }
+}
+
 function classesFor(guardRanges: ReadonlyArray<readonly [number, number]>): BarClass[] {
   const classes: BarClass[] = new Array<BarClass>(EAN_UPC_MODULES).fill("data");
   for (const [start, end] of guardRanges) {
@@ -118,6 +136,7 @@ function classesFor(guardRanges: ReadonlyArray<readonly [number, number]>): BarC
  * them beneath their own bars.
  */
 export function encodeUpcA(digits12: string): EanUpcSymbol {
+  assertGtinDigits(digits12, 12, "UPC-A");
   let pattern = START_GUARD;
   for (let i = 0; i < 6; i += 1) pattern += L_CODES[digitAt(digits12, i)];
   pattern += CENTRE_GUARD;
@@ -142,6 +161,7 @@ export function encodeUpcA(digits12: string): EanUpcSymbol {
  * the left light margin.
  */
 export function encodeEan13(digits13: string): EanUpcSymbol {
+  assertGtinDigits(digits13, 13, "EAN-13");
   const parity = EAN13_PARITY[digitAt(digits13, 0)];
   let pattern = START_GUARD;
   for (let i = 1; i <= 6; i += 1) {
@@ -175,7 +195,12 @@ export function normaliseUpcA(raw: string): GtinResult {
   if (first.error.code !== "BAD_LENGTH") return first;
 
   const wide = normaliseGtin(raw, { accept: [13, 14] });
-  if (!wide.ok) return badLength(raw, "11, 12, 13 or 14");
+  // Only a LENGTH failure means "none of the accepted forms"; a wrong check
+  // digit on a well-formed 13/14-digit value is that value's own defect and
+  // must be reported as such, not relabelled as a length problem.
+  if (!wide.ok) {
+    return wide.error.code === "BAD_LENGTH" ? badLength(raw, "11, 12, 13 or 14") : wide;
+  }
   const digits = wide.value.gtin;
   const drop = digits.length - 12;
   if (digits.slice(0, drop) !== "0".repeat(drop)) {
@@ -217,7 +242,9 @@ export function normaliseEan13(raw: string): GtinResult {
   if (twelve.error.code !== "BAD_LENGTH") return twelve;
 
   const fourteen = normaliseGtin(raw, { accept: [14] });
-  if (!fourteen.ok) return badLength(raw, "12, 13 or 14");
+  if (!fourteen.ok) {
+    return fourteen.error.code === "BAD_LENGTH" ? badLength(raw, "12, 13 or 14") : fourteen;
+  }
   const digits = fourteen.value.gtin;
   if (!digits.startsWith("0")) {
     return {

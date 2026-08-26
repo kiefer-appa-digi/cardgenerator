@@ -38,12 +38,30 @@ function measurementText(m: { value: number; unitCode: string } | null): string 
   return m.unitCode === "" ? String(m.value) : `${m.value} ${m.unitCode}`;
 }
 
+/**
+ * "4.5 x 7.25 x 1.125 INH" only when all three really are in INH. A registry can
+ * publish a width in inches and a height in millimetres; hoisting the first unit
+ * it finds onto all three prints a dimension that is wrong by a factor of 25.4,
+ * so a mixed set is written out unit by unit instead.
+ */
 function dimensionsText(record: Gs1ProductRecord): string {
   const { width, height, depth } = record.dimensions;
   if (width === null && height === null && depth === null) return "";
-  const parts = [width, height, depth].map((m) => (m === null ? "?" : String(m.value)));
-  const unit = [width, height, depth].find((m) => m !== null && m.unitCode !== "")?.unitCode ?? "";
-  return unit === "" ? parts.join(" x ") : `${parts.join(" x ")} ${unit}`;
+  const present = [width, height, depth].filter((m) => m !== null);
+  const units = new Set(present.map((m) => m.unitCode));
+  const shared = units.size === 1 ? present[0].unitCode : "";
+  if (shared !== "") {
+    const parts = [width, height, depth].map((m) => (m === null ? "?" : String(m.value)));
+    return `${parts.join(" x ")} ${shared}`;
+  }
+  if (units.size === 1) {
+    // One unit, and it is the empty one: no unit is known for any value.
+    return [width, height, depth].map((m) => (m === null ? "?" : String(m.value))).join(" x ");
+  }
+  const parts = [width, height, depth].map((m) =>
+    m === null ? "?" : m.unitCode === "" ? String(m.value) : `${m.value} ${m.unitCode}`,
+  );
+  return parts.join(" x ");
 }
 
 /**
@@ -324,23 +342,35 @@ export function applyAcceptedFields(
 }
 
 /**
- * Set a dotted path to a string. Only walks through objects that already exist,
- * so an accepted path can never invent a new branch of the context, and only
- * writes over a string or an absent key (`custom.*` starts out absent).
+ * Segments that name a prototype rather than data. `__proto__` resolves to
+ * `Object.prototype`, which is an object that "already exists", so walking it
+ * would let an accepted path write a property onto every object in the process.
+ * The mapping table never produces one; the check is here because
+ * `applyAcceptedFields` takes its diff rows as an argument and a caller may one
+ * day hand it rows that round-tripped through a form post.
+ */
+const FORBIDDEN_SEGMENTS = new Set(["__proto__", "prototype", "constructor"]);
+
+/**
+ * Set a dotted path to a string. Only walks through own, plain-object
+ * properties that already exist, so an accepted path can never invent a new
+ * branch of the context nor reach a prototype, and only writes over a string or
+ * an absent key (`custom.*` starts out absent).
  */
 function writeStringPath(target: ProductContext, path: string, value: string): boolean {
   const parts = path.split(".");
-  if (parts.length === 0) return false;
+  if (parts.length === 0 || parts.some((p) => p === "" || FORBIDDEN_SEGMENTS.has(p))) return false;
 
   let cursor: Record<string, unknown> = target as unknown as Record<string, unknown>;
   for (let i = 0; i < parts.length - 1; i++) {
+    if (!Object.prototype.hasOwnProperty.call(cursor, parts[i])) return false;
     const next = cursor[parts[i]];
     if (next === null || typeof next !== "object" || Array.isArray(next)) return false;
     cursor = next as Record<string, unknown>;
   }
 
   const leaf = parts[parts.length - 1];
-  const existing = cursor[leaf];
+  const existing = Object.prototype.hasOwnProperty.call(cursor, leaf) ? cursor[leaf] : undefined;
   if (existing !== undefined && typeof existing !== "string") return false;
   cursor[leaf] = value;
   return true;

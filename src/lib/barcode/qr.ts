@@ -61,6 +61,27 @@ function toMatrix(text: string): QrResult {
   }
 }
 
+/**
+ * A Digital Link is only useful if it resolves. The configured domain reaches us
+ * as free text, so "exa mple.com" would otherwise be promoted to
+ * "https://exa mple.com/01/..." and encoded verbatim — a QR that scans and then
+ * goes nowhere. Anything that is not a parseable http(s) URI is reported.
+ */
+function isUsableHttpUri(uri: string): boolean {
+  if (/\s/.test(uri)) return false;
+  // Exactly one scheme separator. A domain of "ftp://x.com" is promoted to
+  // "https://ftp://x.com/01/...", which the URL parser happily accepts with a
+  // host of "ftp"; no real resolver path carries a second "://".
+  if ((uri.match(/:\/\//g) ?? []).length !== 1) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(uri);
+  } catch {
+    return false;
+  }
+  return (parsed.protocol === "https:" || parsed.protocol === "http:") && parsed.host.length > 0;
+}
+
 /** Plain QR: the value is encoded verbatim. */
 export function encodeQr(value: string): QrResult {
   if (value.trim().length === 0) {
@@ -81,6 +102,16 @@ export function encodeDigitalLink(value: string, opts: DigitalLinkOptions = {}):
     return { ok: false, error: { code: "EMPTY", message: "no barcode value supplied", value } };
   }
   if (/^https?:\/\//i.test(trimmed)) {
+    if (!isUsableHttpUri(trimmed)) {
+      return {
+        ok: false,
+        error: {
+          code: "BAD_CHARSET",
+          message: `${JSON.stringify(trimmed)} is not a usable http(s) URI`,
+          value,
+        },
+      };
+    }
     const direct = toMatrix(trimmed);
     if (direct.ok) direct.notes.push("value encoded as a supplied Digital Link URI");
     return direct;
@@ -90,6 +121,18 @@ export function encodeDigitalLink(value: string, opts: DigitalLinkOptions = {}):
   if (!gtin.ok) return { ok: false, error: gtin.error };
 
   const uri = digitalLinkUri(gtin.value.gtin, opts);
+  if (!isUsableHttpUri(uri)) {
+    return {
+      ok: false,
+      error: {
+        code: "BAD_CHARSET",
+        message:
+          `Digital Link domain ${JSON.stringify(opts.domain ?? "")} does not form a usable ` +
+          `http(s) URI (${JSON.stringify(uri)})`,
+        value,
+      },
+    };
+  }
   const matrix = toMatrix(uri);
   if (matrix.ok) matrix.notes.push(...gtin.value.notes);
   return matrix;

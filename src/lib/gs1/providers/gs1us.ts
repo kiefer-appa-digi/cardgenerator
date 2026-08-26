@@ -93,6 +93,11 @@ function capabilitiesFor(provider: Gs1ConnectionConfig["provider"]): Gs1Capabili
 
 /* --------------------------------------------------------------- helpers */
 
+/** Substitute every `{gtin}` placeholder; `String.replace` would take only the first. */
+function fillGtinPath(template: string, gtin14: string): string {
+  return template.split("{gtin}").join(encodeURIComponent(gtin14));
+}
+
 function joinUrl(base: string, path: string): string {
   const b = base.replace(/\/+$/, "");
   const p = path.startsWith("/") ? path : `/${path}`;
@@ -154,7 +159,11 @@ function classifyStatus(status: number): { code: Gs1Error["code"]; retryable: bo
   if (status === 429) return { code: "RATE_LIMITED", retryable: true };
   if (status >= 500) return { code: "SERVER_ERROR", retryable: true };
   // Every other 4xx is the caller's fault: retrying sends the same bad request.
-  return { code: "VALIDATION", retryable: false };
+  if (status >= 400) return { code: "VALIDATION", retryable: false };
+  // A 1xx or 3xx reaching here means the transport did not follow the exchange
+  // to a conclusion. Calling it VALIDATION would tell an operator to fix a
+  // payload that the remote never objected to.
+  return { code: "BAD_RESPONSE", retryable: false };
 }
 
 const STATUS_TEXT: Partial<Record<Gs1Error["code"], string>> = {
@@ -355,6 +364,36 @@ function mapWeights(sources: readonly Record<string, unknown>[]): Gs1Weights {
  * usable identifier, which the caller reports as `BAD_RESPONSE` rather than
  * inventing an empty record.
  */
+/**
+ * Does this mapped record carry anything the registry actually said? The GTIN
+ * alone does not count when it came from `fallbackGtin14`: that value is the
+ * caller's own input handed back to it.
+ */
+function hasRemoteContent(record: Gs1ProductRecord): boolean {
+  if (
+    record.sku !== "" ||
+    record.brandName !== "" ||
+    record.productDescription !== "" ||
+    record.labelDescription !== "" ||
+    record.netContent !== "" ||
+    record.countryOfOrigin !== "" ||
+    record.status !== "" ||
+    record.gpcBrickCode !== "" ||
+    record.gpcBrickDescription !== "" ||
+    record.imageUrl !== "" ||
+    record.targetMarkets.length > 0
+  ) {
+    return true;
+  }
+  const c = record.company;
+  if (c.name !== "" || c.gs1CompanyPrefix !== "" || c.licenseStatus !== "" || c.gln !== "" || c.countryOfLicense !== "") {
+    return true;
+  }
+  const { width, height, depth } = record.dimensions;
+  if (width !== null || height !== null || depth !== null) return true;
+  return record.weights.gross !== null || record.weights.net !== null;
+}
+
 export function mapGs1ProductRecord(
   payload: unknown,
   fallbackGtin14: string,
@@ -398,6 +437,13 @@ export function mapGs1ProductRecord(
   out.company = mapCompany(rec);
   out.dimensions = mapDimensions(measurementSources);
   out.weights = mapWeights(measurementSources);
+
+  // Evidence check. Without it a 200 whose body is `{}`, `{"data":null}` or
+  // `{"message":"..."}` maps to a record whose only content is the GTIN the
+  // *caller* supplied — an answer the registry never gave, which `verifyGtin`
+  // would then report as a licensed GTIN.
+  if (!normalized.ok && !hasRemoteContent(out)) return null;
+
   out.raw = redactedRaw;
   return out;
 }
@@ -462,24 +508,45 @@ export function createGs1UsAdapter(config: Gs1ConnectionConfig, deps: Gs1UsDeps)
     return headers;
   }
 
-  /** One request, with the timeout applied by aborting the injected fetch. */
+  /**
+   * One request, bounded by `timeoutMs`.
+   *
+   * The signal is passed to the injected fetch AND the outcome is raced against
+   * the timer. Aborting alone is not enough: a fetch implementation that ignores
+   * `signal` — a polyfill, a gateway wrapper, a test double — would otherwise
+   * leave this awaiting a promise that never settles, and `timeoutMs` would be
+   * documentation rather than a bound. The race makes the timeout the adapter's
+   * own guarantee.
+   */
   async function send(url: string, init: Gs1FetchInit): Promise<HttpOutcome> {
     const controller = new AbortController();
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, config.timeoutMs);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const attempt: Promise<HttpOutcome> = (async () => {
+      try {
+        const res = await fetchFn(url, { ...init, signal: controller.signal });
+        const body = await res.text();
+        return { kind: "response", status: res.status, body, retryAfter: res.headers.get("retry-after") };
+      } catch (err) {
+        if (controller.signal.aborted) return { kind: "timeout" };
+        const message = err instanceof Error ? err.message : String(err);
+        return { kind: "network", message: scrub(message) };
+      }
+    })();
+    // The losing side of the race is abandoned, never rejected-and-unhandled.
+    attempt.catch(() => undefined);
+
+    const expiry = new Promise<HttpOutcome>((resolve) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        resolve({ kind: "timeout" });
+      }, config.timeoutMs);
+    });
+
     try {
-      const res = await fetchFn(url, { ...init, signal: controller.signal });
-      const body = await res.text();
-      return { kind: "response", status: res.status, body, retryAfter: res.headers.get("retry-after") };
-    } catch (err) {
-      if (timedOut) return { kind: "timeout" };
-      const message = err instanceof Error ? err.message : String(err);
-      return { kind: "network", message: scrub(message) };
+      return await Promise.race([attempt, expiry]);
     } finally {
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 
@@ -650,6 +717,20 @@ export function createGs1UsAdapter(config: Gs1ConnectionConfig, deps: Gs1UsDeps)
     return asRecord(red) ?? { value: red };
   }
 
+  /**
+   * A response describing a different GTIN than the one asked about is not a
+   * usable answer: applied to the local product it would attach another item's
+   * brand, description and licence to it. Reported rather than absorbed.
+   */
+  function gtinMismatch(requested: string, returned: string): Gs1Error | null {
+    if (returned === requested) return null;
+    return makeGs1Error(
+      "BAD_RESPONSE",
+      `GS1 answered with a record for ${returned} but ${requested} was requested.`,
+      { retryable: false, attempts: 0 },
+    );
+  }
+
   function rejectBadGtin(gtin: string): Gs1Error | null {
     const norm = normalizeGtin(gtin);
     if (norm.ok) return null;
@@ -721,7 +802,7 @@ export function createGs1UsAdapter(config: Gs1ConnectionConfig, deps: Gs1UsDeps)
           const res = await request(
             "verifyGtin",
             "GET",
-            config.paths.verify.replace("{gtin}", encodeURIComponent(canonical)),
+            fillGtinPath(config.paths.verify, canonical),
             undefined,
             config.retry.maxAttempts,
           );
@@ -750,14 +831,25 @@ export function createGs1UsAdapter(config: Gs1ConnectionConfig, deps: Gs1UsDeps)
 
           const raw = redactedRawOf(res.json);
           const record = mapGs1ProductRecord(res.json, canonical, config.provider, checkedAt, raw);
-          const company = record?.company ?? {
-            name: "",
-            gs1CompanyPrefix: "",
-            licenseStatus: "",
-            gln: "",
-            countryOfLicense: "",
-          };
-          const statusText = (record?.status ?? "").toUpperCase();
+          // "The registry returned 2xx" is not the same fact as "the registry
+          // says this GTIN is licensed". A 200 carrying an empty body, `null`,
+          // or a maintenance notice tells us nothing about the licence, and
+          // answering `verified` there would put a fabricated compliance claim
+          // on the record.
+          if (record === null) {
+            return gs1Err(
+              makeGs1Error(
+                "BAD_RESPONSE",
+                "GS1 answered without a usable record, so the licence status of this GTIN is unknown.",
+                { status: res.status, retryable: false, attempts: res.attempts },
+              ),
+            );
+          }
+          const mismatch = gtinMismatch(canonical, record.gtin);
+          if (mismatch !== null) return gs1Err(mismatch);
+
+          const company = record.company;
+          const statusText = record.status.toUpperCase();
           const inactive =
             statusText.includes("INACTIVE") ||
             statusText.includes("DISCONTINUED") ||
@@ -797,7 +889,7 @@ export function createGs1UsAdapter(config: Gs1ConnectionConfig, deps: Gs1UsDeps)
           const res = await request(
             "fetchProduct",
             "GET",
-            config.paths.product.replace("{gtin}", encodeURIComponent(canonical)),
+            fillGtinPath(config.paths.product, canonical),
             undefined,
             config.retry.maxAttempts,
           );
@@ -815,6 +907,8 @@ export function createGs1UsAdapter(config: Gs1ConnectionConfig, deps: Gs1UsDeps)
               }),
             );
           }
+          const mismatch = gtinMismatch(canonical, record.gtin);
+          if (mismatch !== null) return gs1Err(mismatch);
           return gs1Ok(record, res.attempts, res.durationMs);
         },
         (message) =>
@@ -846,10 +940,16 @@ export function createGs1UsAdapter(config: Gs1ConnectionConfig, deps: Gs1UsDeps)
 
           const body = asRecord(res.json) ?? {};
           const messages = pickList(body, ["messages", "validationMessages", "warnings"]).map(scrub);
+          // A 2xx means the submission was taken. If the body contradicts that
+          // — some endpoints answer 200 with `{"accepted":false}` — the body
+          // wins, because the receipt is what the operator reads.
+          const declined =
+            body.accepted === false ||
+            /^(REJECTED|FAILED|DECLINED|ERROR)$/i.test(pickText(body, ["status", "gtinStatusCode", "state"]));
           return gs1Ok(
             {
               gtin: record.gtin,
-              accepted: true,
+              accepted: !declined,
               remoteId: pickText(body, ["id", "recordId", "productId", "referenceId"]),
               status: pickText(body, ["status", "gtinStatusCode", "state"]),
               submittedAt: new Date().toISOString(),

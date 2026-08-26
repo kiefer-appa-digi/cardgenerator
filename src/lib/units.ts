@@ -84,7 +84,11 @@ export function fromUpt(u: Upt, unit: LengthUnit): number {
   }
 }
 
-const UNIT_DECIMALS: Record<LengthUnit, number> = { in: 4, mm: 3, pt: 2 };
+/**
+ * Inches get 5 places because the supplied presets carry 5 (7.11175 in). Showing
+ * 4 would round a production dimension in the one place an operator reads it.
+ */
+const UNIT_DECIMALS: Record<LengthUnit, number> = { in: 5, mm: 4, pt: 3 };
 
 /** Human display, e.g. formatLength(314460000, "in") === "4.3675" */
 export function formatLength(u: Upt, unit: LengthUnit): string {

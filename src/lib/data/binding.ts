@@ -99,6 +99,22 @@ export function getPath(root: unknown, path: string): unknown {
   return cur;
 }
 
+/**
+ * Is a path one a template is allowed to name?
+ *
+ * A catalogued field always is. So is a path the product actually carries:
+ * `custom.*` holds the free-form columns the importer copied over, and a design
+ * that binds one must not raise BINDING_UNKNOWN_PATH ("this template points at
+ * a field that does not exist") on every export. Presence is tested against
+ * `undefined` — the value `null` still means the field exists and is blank.
+ *
+ * Structured bindings, {token} lookups and visibility rules all ask through
+ * here, so the three cannot disagree about whether the same path is a typo.
+ */
+export function isBindablePath(path: string, value: unknown): boolean {
+  return isKnownPath(path) || value !== undefined;
+}
+
 /** Emptiness as conditional visibility means it: no value, no text, no rows. */
 export function isTruthyValue(value: unknown): boolean {
   if (value === undefined || value === null) return false;
@@ -156,7 +172,9 @@ export function resolveBinding(binding: Binding, ctx: ProductContext): BindingRe
   const path = binding.path;
   const issues: BindingIssue[] = [];
 
-  const unknownPath = !isKnownPath(path);
+  const raw = getPath(ctx, path);
+
+  const unknownPath = !isBindablePath(path, raw);
   if (unknownPath) {
     issues.push({
       code: "UNKNOWN_PATH",
@@ -164,8 +182,6 @@ export function resolveBinding(binding: Binding, ctx: ProductContext): BindingRe
       detail: `"${path}" is not a known product field.`,
     });
   }
-
-  const raw = getPath(ctx, path);
   let status: BindingStatus = "ok";
   let value = "";
   let listCount = 0;
@@ -209,7 +225,12 @@ export function resolveBinding(binding: Binding, ctx: ProductContext): BindingRe
   } else {
     const out = applyFormat(raw, binding.format);
     if (out.issue) issues.push(fromFormatIssue(out.issue, path));
-    value = out.text;
+    // A field holding nothing but whitespace is empty as far as a card is
+    // concerned — the rule isTruthyValue and the list branch above already
+    // apply. Without this an imported cell containing one space counts as
+    // content: the fallback is skipped, hideWhenEmpty does not fire, and the
+    // slot sets as a bare "P/N " with nothing after it.
+    value = out.text.trim() === "" ? "" : out.text;
     status = value === "" ? "empty" : "ok";
   }
 
@@ -410,7 +431,9 @@ export function resolveTokensWith(
       });
       continue;
     }
-    if (rendered.text === "") {
+    // Whitespace-only is empty: a token that sets three spaces inside "P/N {x}"
+    // is the same defect as one that sets nothing, and must report as one.
+    if (rendered.text.trim() === "") {
       unresolvedCount += 1;
       issues.push({
         code: "EMPTY_VALUE",
@@ -448,7 +471,7 @@ export function productLookup(ctx: ProductContext): TokenLookup {
   return (path) => {
     const value = getPath(ctx, path);
     const found = value !== undefined && value !== null;
-    return { found, known: isKnownPath(path) || found, value };
+    return { found, known: isBindablePath(path, value), value };
   };
 }
 
@@ -527,11 +550,21 @@ export function evaluateVisibleWhen(
     return { visible: true, reason: "visible", issues };
   }
   const raw = getPath(ctx, parsed.path);
-  if (!isKnownPath(parsed.path) && raw === undefined) {
+  if (!isBindablePath(parsed.path, raw)) {
     issues.push({
       code: "UNKNOWN_PATH",
       path: parsed.path,
       detail: `Visibility rule points at "${parsed.path}", which is not a known product field.`,
+    });
+  }
+  // `unquote` only strips a matched pair, so a leading quote left in the
+  // literal means the designer never closed it. That comparison can never be
+  // true, which silently hides the element; say so instead.
+  if ((parsed.op === "eq" || parsed.op === "ne") && /^["']/.test(parsed.literal)) {
+    issues.push({
+      code: "UNRESOLVED_TOKEN",
+      path: parsed.path,
+      detail: `Visibility rule "${expr}" has an unclosed quote; it compared against the literal text ${parsed.literal}.`,
     });
   }
 

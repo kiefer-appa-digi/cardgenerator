@@ -72,7 +72,7 @@ export function EmptyState({
   action?: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
+    <div className="flex flex-col items-center justify-center px-6 py-10 text-center">
       <h3 className="text-sm font-semibold text-ink-200">{title}</h3>
       <p className="mt-1.5 max-w-md text-sm leading-relaxed text-ink-400">{description}</p>
       {action ? <div className="mt-5">{action}</div> : null}

@@ -226,6 +226,7 @@ type RowStats = {
   distinct: number;
   labelLike: number;
   typedNonText: number;
+  merged: number;
 };
 
 const DIGIT = /[0-9]/g;
@@ -244,16 +245,18 @@ function rowStats(row: ParsedCell[], rowNumber: number): RowStats {
   let filled = 0;
   let labelLike = 0;
   let typedNonText = 0;
+  let merged = 0;
   for (const cell of row) {
     if (cell.text.length === 0) continue;
     filled += 1;
     seen.add(cell.text);
     if (looksLikeLabel(cell)) labelLike += 1;
+    if (cell.merged) merged += 1;
     if (cell.type === "number" || cell.type === "date" || cell.type === "boolean") {
       typedNonText += 1;
     }
   }
-  return { rowNumber, filled, distinct: seen.size, labelLike, typedNonText };
+  return { rowNumber, filled, distinct: seen.size, labelLike, typedNonText, merged };
 }
 
 function rowIsBlank(row: ParsedCell[] | undefined): boolean {
@@ -288,10 +291,16 @@ function findHeaderRow(grid: ParsedCell[][]): HeaderChoice {
     return false;
   };
 
+  /**
+   * A merged group row ("Identity" spanning two columns) repeats its value across
+   * the span, so a high merged ratio is what separates a banner from a header row
+   * that legitimately carries the same label twice.
+   */
   const qualifies = (s: RowStats): boolean =>
     s.filled >= 1 &&
     s.filled / maxFilled >= 0.5 &&
-    s.distinct / s.filled >= 0.9 &&
+    s.merged / s.filled <= 0.3 &&
+    s.distinct / s.filled >= 0.6 &&
     s.labelLike / s.filled >= 0.6 &&
     s.typedNonText / s.filled <= 0.3;
 

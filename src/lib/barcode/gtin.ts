@@ -22,12 +22,18 @@ export function isDigits(s: string): boolean {
 }
 
 /**
- * Strip the separators humans and spreadsheets insert. Nothing else is removed,
- * so a value carrying a letter still fails `isDigits` and is reported rather
- * than quietly truncated.
+ * Strip the separators humans and spreadsheets insert, e.g. "0 36000 29145 2".
+ *
+ * A separator is only removed when it sits BETWEEN two digits. A leading or a
+ * trailing one is significant and is left in place so that `isDigits` reports
+ * it: "-36000291452" must not become the eleven-digit body "36000291452" and
+ * then be handed a freshly computed check digit, which is how a negative number
+ * in a spreadsheet cell would otherwise print as a valid-looking, wrong UPC.
+ * Nothing else is removed, so a value carrying a letter still fails `isDigits`
+ * and is reported rather than quietly truncated.
  */
 export function sanitiseDigits(raw: string): string {
-  return raw.replace(/[\s _.\-]/g, "");
+  return raw.trim().replace(/([0-9])[\s_.\-]+(?=[0-9])/g, "$1");
 }
 
 /**
@@ -114,7 +120,8 @@ export type NormaliseOptions = {
  */
 export function normaliseGtin(raw: string, opts: NormaliseOptions): GtinResult {
   const original = raw;
-  const digits = sanitiseDigits(raw.trim());
+  const trimmed = raw.trim();
+  const digits = sanitiseDigits(trimmed);
   if (digits.length === 0) {
     return err("EMPTY", "no barcode value supplied", original);
   }
@@ -123,6 +130,11 @@ export function normaliseGtin(raw: string, opts: NormaliseOptions): GtinResult {
   }
 
   const notes: string[] = [];
+  // The printed identifier is no longer byte-identical to the value we were
+  // given, so say so rather than let a stray separator pass unremarked.
+  if (digits !== trimmed) {
+    notes.push(`separators removed from "${trimmed}"`);
+  }
   const bodyLengths = opts.acceptBodyOf ?? [];
   let complete: string;
 

@@ -460,6 +460,10 @@ export const UpsertProductOpSchema = z.object({
   /** Only the fields the mapping actually supplied a non-blank value for. */
   values: z.record(z.string(), z.string()),
   custom: z.record(z.string(), z.string()),
+  /** Written to the fitments table alongside the product, in order. */
+  fitments: z.array(z.string()),
+  /** Written to the warnings table alongside the product, in order. */
+  warnings: z.array(z.string()),
   /** Provenance, retained verbatim on the product row (spec §5.11). */
   sourceRow: z.record(z.string(), z.string()),
 });

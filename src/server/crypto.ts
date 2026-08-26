@@ -142,6 +142,7 @@ export function decryptCredential(
     typeof payload.iv !== "string" ||
     typeof payload.tag !== "string" ||
     payload.ciphertext === "" ||
+    payload.ciphertext.length % 2 !== 0 ||
     !HEX_ONLY.test(payload.ciphertext) ||
     !HEX_ONLY.test(payload.iv) ||
     !HEX_ONLY.test(payload.tag) ||
@@ -296,7 +297,11 @@ function scrubLiterals(input: string, secrets: readonly string[]): string {
     // Below 8 characters a "secret" is likely to be a common substring; blanket
     // replacement would corrupt unrelated text without protecting anything real.
     if (typeof secret !== "string" || secret.length < 8) continue;
-    while (out.includes(secret)) out = out.replace(secret, REDACTED);
+    // split/join replaces every occurrence in one pass. A `while (includes)`
+    // loop must not be used here: a secret that is a substring of REDACTED
+    // (e.g. "redacted") reintroduces itself on every replacement and spins
+    // forever, blocking the event loop of the whole server.
+    if (out.includes(secret)) out = out.split(secret).join(REDACTED);
   }
   return out;
 }

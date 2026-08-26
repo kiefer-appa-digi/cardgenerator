@@ -147,16 +147,30 @@ describe("resolveBinding", () => {
   });
 
   it("reports a path that is not in the field catalogue", () => {
-    const r = resolveBinding(makeBinding({ path: "custom.promoLine" }), ctx);
-    expect(r.unknownPath).toBe(true);
-    expect(codes(r.issues)).toContain("UNKNOWN_PATH");
-    // Present but empty: it resolves, it is just blank on this product.
-    expect(r.status).toBe("empty");
-
     const missing = resolveBinding(makeBinding({ path: "partNo" }), ctx);
     expect(missing.unknownPath).toBe(true);
     expect(codes(missing.issues)).toEqual(["UNKNOWN_PATH", "MISSING_VALUE"]);
     expect(missing.text).toBe("");
+  });
+
+  it("does not call an uncatalogued field the product carries a template defect", () => {
+    // `custom.*` is the free-form column set the importer copies over: it is
+    // not in FIELD_CATALOG, but a design that binds one is not broken, and
+    // BINDING_UNKNOWN_PATH means "this template points at a field that does not
+    // exist". The {token} form and the structured form must give one answer.
+    const r = resolveBinding(makeBinding({ path: "custom.promoLine" }), ctx);
+    expect(r.unknownPath).toBe(false);
+    // Present but empty on this product: blank, not a typo.
+    expect(r.status).toBe("empty");
+    expect(codes(r.issues)).toEqual(["EMPTY_VALUE"]);
+    expect(codes(resolveTokens("{custom.promoLine}", ctx).issues)).not.toContain("UNKNOWN_PATH");
+
+    const promo = fixture();
+    promo.custom = { promoLine: "Now with 20% more grease" };
+    const filled = resolveBinding(makeBinding({ path: "custom.promoLine" }), promo);
+    expect(filled.text).toBe("Now with 20% more grease");
+    expect(filled.issues).toEqual([]);
+    expect(resolveTokensText("{custom.promoLine}", promo)).toBe("Now with 20% more grease");
   });
 
   it("maps issues onto preflight check codes", () => {
@@ -543,6 +557,114 @@ describe("renderBomLines", () => {
     expect(renderBomBlock(bomEl(), ctx).heading).toBe("THIS PACK INCLUDES:");
     expect(renderBomBlock(bomEl({ heading: "{brand.name} PACK:" }), ctx).heading).toBe("Axle Teknology PACK:");
     expect(renderBomBlock(bomEl({ showHeading: false }), ctx).heading).toBeNull();
+  });
+});
+
+/* --------------------------------------------------- data hygiene (review) */
+
+/**
+ * Regression cover for the defects the adversarial pass found: each of these
+ * printed a wrong or machine-dependent answer on a card, or threw, before the
+ * fix that sits beside it.
+ */
+describe("data hygiene", () => {
+  const ctx = fixture();
+
+  it("reads a date-time with no offset as UTC, not off the renderer's clock", () => {
+    // Date.parse() calls an offset-less stamp LOCAL time, so the same product
+    // string set Aug 26 on a UTC export worker and Aug 27 on a designer's
+    // machine in Chicago. The instant must not depend on the machine.
+    expect(coerceDate("2026-08-26T20:00")?.toISOString()).toBe("2026-08-26T20:00:00.000Z");
+    expect(coerceDate("2026-08-26 20:00")?.toISOString()).toBe("2026-08-26T20:00:00.000Z");
+    expect(coerceDate("2026-08-26T20:00:00.5")?.toISOString()).toBe("2026-08-26T20:00:00.500Z");
+    // An explicit offset still means exactly what it says.
+    expect(coerceDate("2026-08-26T20:00:00-05:00")?.toISOString()).toBe("2026-08-27T01:00:00.000Z");
+    expect(coerceDate("2026-08-26T20:00:00Z")?.toISOString()).toBe("2026-08-26T20:00:00.000Z");
+
+    const tz = process.env.TZ;
+    try {
+      for (const zone of ["UTC", "America/Chicago", "Pacific/Kiritimati", "Pacific/Midway"]) {
+        process.env.TZ = zone;
+        const d = coerceDate("2026-08-26T20:00");
+        expect(formatDate(d as Date, "MMM d, yyyy")).toBe("Aug 26, 2026");
+      }
+    } finally {
+      process.env.TZ = tz;
+    }
+  });
+
+  it("rejects a date that does not exist rather than rolling it forward", () => {
+    expect(coerceDate("2026-02-31")).toBeNull();
+    expect(coerceDate("2026-13-01")).toBeNull();
+    expect(coerceDate("2026-08-26T25:00")).toBeNull();
+    expect(coerceDate("26 August 2026")).toBeNull();
+  });
+
+  it("reports a number under a date pattern instead of printing 1970", () => {
+    const out = applyFormat(5, "MMM d, yyyy");
+    expect(out.text).toBe("5");
+    expect(out.applied).toBe(false);
+    expect(out.issue?.kind).toBe("not-a-date");
+
+    const r = resolveBinding(makeBinding({ path: "bom.itemCount", format: "MMM d, yyyy" }), ctx);
+    expect(r.text).toBe("5");
+    expect(codes(r.issues)).toContain("BAD_FORMAT");
+  });
+
+  it("never throws on a format hint a designer can type", () => {
+    // toFixed() accepts 0-100 fraction digits and throws outside them; a pasted
+    // pattern must not take the preview or the PDF writer down with it.
+    expect(() => applyFormat(1.5, "0." + "#".repeat(120))).not.toThrow();
+    expect(() => applyFormat(1.5, "0".repeat(5_000))).not.toThrow();
+    expect(applyFormat(1.5, "0." + "0".repeat(120)).text.length).toBeLessThan(140);
+  });
+
+  it("prints a number it cannot express in digits plainly, not grouped into gibberish", () => {
+    expect(formatNumber(1e21, "#,##0.00")).toBe("1e+21");
+    expect(formatNumber(1e307, "0.0%")).toBe("1e+307");
+  });
+
+  it("refuses a numeric string whose commas are not group separators", () => {
+    expect(coerceNumber("1,234.5")).toBe(1234.5);
+    expect(coerceNumber("1,2,3")).toBeNull();
+    // A European decimal comma is not 1.23456.
+    expect(coerceNumber("1.234,56")).toBeNull();
+  });
+
+  it("title-cases a word that opens with an accented letter", () => {
+    expect(applyTextTransform("élan vital", "titlecase")).toBe("Élan Vital");
+    expect(applyTextTransform("(bearing) kit", "titlecase")).toBe("(Bearing) Kit");
+    expect(applyTextTransform("11-500 l44649", "titlecase")).toBe("11-500 L44649");
+  });
+
+  it("treats a whitespace-only field as empty", () => {
+    // An imported cell holding one space is not content: without this the
+    // fallback is skipped, hideWhenEmpty does not fire, and the slot sets as a
+    // bare "P/N " with nothing after it.
+    const blank = fixture();
+    blank.subtitle = "   ";
+    const r = resolveBinding(makeBinding({ path: "subtitle", prefix: "P/N ", hideWhenEmpty: true }), blank);
+    expect(r.text).toBe("");
+    expect(r.value).toBe("");
+    expect(r.status).toBe("empty");
+    expect(r.hidden).toBe(true);
+    expect(codes(r.issues)).toContain("EMPTY_VALUE");
+
+    expect(resolveBindingText(makeBinding({ path: "subtitle", fallback: "TBD" }), blank)).toBe("TBD");
+    // The visibility rule already read that field as empty; now they agree.
+    expect(evaluateVisibleWhen("subtitle", blank).visible).toBe(false);
+
+    const t = resolveTokens("[{subtitle}]", blank);
+    expect(t.text).toBe("[]");
+    expect(codes(t.issues)).toEqual(["EMPTY_VALUE"]);
+  });
+
+  it("reports a visibility rule with an unclosed quote instead of hiding silently", () => {
+    const d = evaluateVisibleWhen('status == "In Use', ctx);
+    expect(d.visible).toBe(false);
+    expect(codes(d.issues)).toContain("UNRESOLVED_TOKEN");
+    // The well-formed rule is unaffected.
+    expect(evaluateVisibleWhen('status == "In Use"', ctx).issues).toEqual([]);
   });
 });
 

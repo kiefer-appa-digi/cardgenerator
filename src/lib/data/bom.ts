@@ -1,7 +1,8 @@
-import { isKnownPath, type ProductContext } from "./context";
+import type { ProductContext } from "./context";
 import {
   PRODUCT_TOKEN_PREFIX,
   getPath,
+  isBindablePath,
   resolveTokens,
   resolveTokensWith,
   type BindingIssue,
@@ -75,7 +76,7 @@ export function bomRowLookup(row: unknown, ctx: ProductContext): TokenLookup {
       const direct = path.slice(PRODUCT_TOKEN_PREFIX.length);
       const value = getPath(ctx, direct);
       const found = value !== undefined && value !== null;
-      return { found, known: isKnownPath(direct) || found, value };
+      return { found, known: isBindablePath(direct, value), value };
     }
     const value = getPath(row, path);
     const found = value !== undefined && value !== null;

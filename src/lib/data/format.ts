@@ -27,9 +27,11 @@ import type { TextTransform } from "@/lib/design/schema";
 /**
  * Case transform for a binding's resolved value.
  *
- * Kept byte-identical to `applyTransform` in lib/text/layout.ts rather than
- * imported from it: that module pulls the generated font metrics table in, and
- * resolving a binding must not drag a megabyte of glyph widths behind it.
+ * Deliberately not imported from `applyTransform` in lib/text/layout.ts: that
+ * module pulls the generated font metrics table in, and resolving a binding
+ * must not drag a megabyte of glyph widths behind it. The two were identical
+ * until titlecase was corrected here; lib/text/layout.ts still carries the
+ * ASCII-only version and mis-cases any word that opens with an accented letter.
  */
 export function applyTextTransform(s: string, t: TextTransform): string {
   switch (t) {
@@ -38,7 +40,19 @@ export function applyTextTransform(s: string, t: TextTransform): string {
     case "lowercase":
       return s.toLowerCase();
     case "titlecase":
-      return s.replace(/\w\S*/g, (w) => w[0].toUpperCase() + w.slice(1).toLowerCase());
+      // Capitalise the first CASED character of each word rather than the
+      // first ASCII word character: a pattern anchored on \w begins matching
+      // AFTER a leading accent, so "elan" spelt with an acute set as "eLan".
+      // Testing "cased" by comparing a character with its own uppercase keeps
+      // this ES2017-safe, with no Unicode property escapes.
+      return s.replace(/\S+/g, (w) => {
+        const lower = w.toLowerCase();
+        for (let i = 0; i < lower.length; i++) {
+          const up = lower[i].toUpperCase();
+          if (up !== lower[i]) return lower.slice(0, i) + up + lower.slice(i + 1);
+        }
+        return lower;
+      });
     default:
       return s;
   }
@@ -129,12 +143,22 @@ export function stringifyScalar(value: unknown): string {
 
 /* ---------------------------------------------------------------- coercion */
 
-/** Accepts numbers and numeric strings, group separators included. */
+/**
+ * Accepts numbers and numeric strings, group separators included.
+ *
+ * A comma is only honoured where a group separator can legally sit. Stripping
+ * every comma unconditionally turns "1.234,56" into 1.23456 and "1,2,3" into
+ * 123 — a wrong number printed with no warning, which is worse than reporting
+ * that the value is not a number and setting it verbatim.
+ */
 export function coerceNumber(value: unknown): number | null {
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (typeof value === "string") {
-    const s = value.trim().replace(/,/g, "");
-    if (s === "" || !/^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/.test(s)) return null;
+    const trimmed = value.trim();
+    if (trimmed === "") return null;
+    if (trimmed.includes(",") && !/^[+-]?\d{1,3}(,\d{3})+(\.\d*)?$/.test(trimmed)) return null;
+    const s = trimmed.replace(/,/g, "");
+    if (!/^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/.test(s)) return null;
     const n = Number(s);
     return Number.isFinite(n) ? n : null;
   }
@@ -142,25 +166,66 @@ export function coerceNumber(value: unknown): number | null {
 }
 
 /** ISO 8601 only. `Date.parse` of anything else is implementation-defined. */
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
+const ISO_DATE =
+  /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
+
+/**
+ * Read an ISO-8601 string as an instant, WITHOUT `Date.parse`.
+ *
+ * `Date.parse("2026-08-26T20:00")` is defined to mean local time, so the same
+ * product string becomes Aug 26 on a UTC export worker and Aug 27 on a designer's
+ * machine in Chicago — the exact split between preview and plate this module
+ * exists to prevent. A stamp with no offset is therefore read as UTC, an
+ * explicit offset is honoured, and the calendar is checked so "2026-02-31"
+ * is rejected instead of rolling forward into March.
+ */
+function parseIsoUtc(s: string): Date | null {
+  const m = ISO_DATE.exec(s);
+  if (m === null) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const hour = m[4] === undefined ? 0 : Number(m[4]);
+  const minute = m[5] === undefined ? 0 : Number(m[5]);
+  const second = m[6] === undefined ? 0 : Number(m[6]);
+  const ms = m[7] === undefined ? 0 : Number((m[7] + "000").slice(0, 3));
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  if (hour > 23 || minute > 59 || second > 59) return null;
+
+  const base = new Date(Date.UTC(year, month - 1, day, hour, minute, second, ms));
+  // Date.UTC maps years 0-99 onto 1900-1999; the pattern allows "0026".
+  if (year >= 0 && year <= 99) base.setUTCFullYear(year);
+  if (Number.isNaN(base.getTime())) return null;
+  // A date that rolled over (31 February) is a typo, not a date.
+  if (
+    base.getUTCFullYear() !== year ||
+    base.getUTCMonth() !== month - 1 ||
+    base.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
+  const zone = m[8];
+  if (zone === undefined || zone === "Z") return base;
+  const sign = zone[0] === "-" ? -1 : 1;
+  const offsetMinutes = sign * (Number(zone.slice(1, 3)) * 60 + Number(zone.slice(-2)));
+  return new Date(base.getTime() - offsetMinutes * 60_000);
+}
 
 export function coerceDate(value: unknown): Date | null {
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
-  if (typeof value === "number" && Number.isFinite(value)) {
-    // A bare number under a date pattern is epoch milliseconds.
-    const d = new Date(value);
-    return Number.isNaN(d.getTime()) ? null : d;
-  }
-  if (typeof value === "string") {
-    const s = value.trim();
-    if (!ISO_DATE.test(s)) return null;
-    const ms = Date.parse(s);
-    return Number.isNaN(ms) ? null : new Date(ms);
-  }
+  // A bare number is NOT read as epoch milliseconds. No field in ProductContext
+  // carries one, so the only way a number meets a date pattern is a mistyped
+  // format on a count — and printing "Jan 1, 1970" with no warning puts a false
+  // date on a plate. Reporting "that is not a date" is the honest answer.
+  if (typeof value === "string") return parseIsoUtc(value.trim());
   return null;
 }
 
 /* ----------------------------------------------------------------- numbers */
+
+/** Fraction digits `toFixed` accepts, and the cap we apply to a typed pattern. */
+const MAX_PATTERN_DIGITS = 100;
 
 export type NumberPattern = {
   prefix: string;
@@ -202,12 +267,16 @@ export function parseNumberPattern(pattern: string): NumberPattern | null {
   const lastComma = intPart.lastIndexOf(",");
   const groupSize = grouping ? intPart.length - lastComma - 1 : 3;
 
+  // toFixed() throws outside 0-100 fraction digits, and a pattern with hundreds
+  // of placeholders is a paste accident, not a layout. Cap both runs so a typed
+  // format hint can never throw out of the preview or the PDF writer.
+  const maxFrac = Math.min(fracPart.length, MAX_PATTERN_DIGITS);
   return {
     prefix,
     suffix,
-    minInt,
-    minFrac: (fracPart.match(/0/g) ?? []).length,
-    maxFrac: fracPart.length,
+    minInt: Math.min(minInt, MAX_PATTERN_DIGITS),
+    minFrac: Math.min((fracPart.match(/0/g) ?? []).length, maxFrac),
+    maxFrac,
     grouping,
     groupSize: groupSize > 0 ? groupSize : 3,
     scale: suffix.includes("%") || prefix.includes("%") ? 100 : 1,
@@ -227,6 +296,10 @@ export function formatNumber(value: number, pattern: string): string {
   const p = parseNumberPattern(pattern);
   if (p === null) return stringifyScalar(value);
   const scaled = value * p.scale;
+  // At 1e21 toFixed switches to exponential notation, and "1e+21" run through
+  // the grouper comes out as "1e,+21". Print the plain number instead of a
+  // corrupted one; a percent scale can also overflow a finite value to Infinity.
+  if (!Number.isFinite(scaled) || Math.abs(scaled) >= 1e21) return stringifyScalar(value);
 
   // toFixed carries JS double rounding. These are display quantities, not money
   // arithmetic, and the same double always rounds the same way, so the editor
@@ -240,7 +313,7 @@ export function formatNumber(value: number, pattern: string): string {
   while (end > p.minFrac && fracDigits[end - 1] === "0") end--;
   fracDigits = fracDigits.slice(0, end);
 
-  while (intDigits.length < p.minInt) intDigits = "0" + intDigits;
+  intDigits = intDigits.padStart(p.minInt, "0");
   // Unlike ICU, at least one integer digit always survives: a bare ".5" on a
   // printed card reads as a broken glyph, not as a number.
   if (intDigits === "") intDigits = "0";

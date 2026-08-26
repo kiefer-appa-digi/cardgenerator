@@ -58,7 +58,18 @@ export function applyTransform(s: string, t: TextTransform): string {
     case "lowercase":
       return s.toLowerCase();
     case "titlecase":
-      return s.replace(/\w\S*/g, (w) => w[0].toUpperCase() + w.slice(1).toLowerCase());
+      // Capitalise the first CASED character of each word rather than the first
+      // \w: a word opening with an accent would otherwise have its SECOND letter
+      // capitalised. Comparing a character to its own uppercase avoids needing
+      // a Unicode property escape. Mirrors applyTextTransform in lib/data/format.ts.
+      return s.replace(/\S+/g, (w) => {
+        const lower = w.toLowerCase();
+        for (let i = 0; i < lower.length; i++) {
+          const up = lower[i].toUpperCase();
+          if (up !== lower[i]) return lower.slice(0, i) + up + lower.slice(i + 1);
+        }
+        return lower;
+      });
     default:
       return s;
   }

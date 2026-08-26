@@ -1,5 +1,12 @@
 import type { BarcodeError } from "./types";
-import { calculateCheckDigit, isDigits, padGtin, sanitiseDigits } from "./gtin";
+import {
+  GTIN_LENGTHS,
+  calculateCheckDigit,
+  isDigits,
+  padGtin,
+  sanitiseDigits,
+  type GtinLength,
+} from "./gtin";
 
 /**
  * Code 128 / GS1-128 — spec §12 and the GS1 parts of §13.
@@ -290,6 +297,15 @@ export function encodeCode128Text(text: string): Code128Encoding {
 export type AiElement = { ai: string; value: string };
 
 /**
+ * GS1 AI encodable character set 82 (General Specifications figure 7.11-1):
+ * the 82 characters an AI data field may hold. It is NOT "printable ASCII" —
+ * it excludes space, #, $, @, [, \, ], ^, `, {, |, } and ~. Encoding one of
+ * those produces a symbol that scans but that a GS1 verifier rejects, so an AI
+ * value carrying one is reported rather than encoded.
+ */
+const CSET_82 = /^[!"%&'()*+,\-./0-9:;<=>?A-Z_a-z]+$/;
+
+/**
  * GS1 Application Identifiers of defined length (General Specifications figure
  * "GS1 Application Identifiers of defined length"), keyed by the first two
  * digits of the AI. The number is the total element length, AI included, so
@@ -454,12 +470,15 @@ export function encodeGs1_128(raw: string): Gs1_128Result {
           },
         };
       }
-      if (digits.length < 8 || digits.length > 14) {
+      // 8, 12, 13 and 14 are the only lengths the GS1 General Specifications
+      // define for a GTIN. Accepting 9, 10 or 11 and zero-padding to 14 would
+      // manufacture an identifier that names no product.
+      if (!GTIN_LENGTHS.includes(digits.length as GtinLength)) {
         return {
           ok: false,
           error: {
             code: "BAD_LENGTH",
-            message: `AI (${el.ai}) expects a GTIN of 8 to 14 digits, received ${digits.length}`,
+            message: `AI (${el.ai}) expects a GTIN of 8, 12, 13 or 14 digits, received ${digits.length}`,
             value: raw,
           },
         };
@@ -479,18 +498,20 @@ export function encodeGs1_128(raw: string): Gs1_128Result {
       value = padGtin(digits, 14);
     }
 
-    for (let k = 0; k < value.length; k += 1) {
-      const c = value.charCodeAt(k);
-      if (c < 32 || c > 126) {
-        return {
-          ok: false,
-          error: {
-            code: "BAD_CHARSET",
-            message: `AI (${el.ai}) contains a character outside the GS1 encodable set`,
-            value: raw,
-          },
-        };
-      }
+    if (!CSET_82.test(value)) {
+      const offender = value
+        .split("")
+        .find((ch) => !CSET_82.test(ch));
+      return {
+        ok: false,
+        error: {
+          code: "BAD_CHARSET",
+          message:
+            `AI (${el.ai}) contains ${JSON.stringify(offender ?? value)}, which is outside ` +
+            "GS1 encodable character set 82",
+          value: raw,
+        },
+      };
     }
 
     const fixed = predefinedLength(el.ai);

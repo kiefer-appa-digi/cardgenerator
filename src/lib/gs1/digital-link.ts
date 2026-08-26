@@ -63,8 +63,27 @@ export type BuildDigitalLinkResult =
 
 export const DEFAULT_RESOLVER_DOMAIN = "https://id.gs1.org";
 
-/** GS1 restricts qualifier and attribute values to a printable, URI-safe subset. */
-const SAFE_VALUE = /^[\x21-\x22\x25-\x2F\x30-\x39\x3A-\x3F\x41-\x5A\x5F\x61-\x7A]{1,48}$/;
+/**
+ * GS1 restricts AI values to CSET 82 — the 82 printable characters
+ * `!"%&\'()*+,-./0-9:;<=>?A-Z_a-z`. Length is checked separately because it is
+ * per-AI: the path qualifiers (AI 10 batch/lot, 21 serial, 22 CPV) are each
+ * capped at 20 characters by the General Specifications, and emitting a longer
+ * one produces a URI no conformant resolver will accept.
+ */
+const CSET_82 = /^[\x21-\x22\x25-\x2F\x30-\x39\x3A-\x3F\x41-\x5A\x5F\x61-\x7A]+$/;
+
+/** GS1 General Specifications field lengths, by AI. */
+const MAX_VALUE_LENGTH: Record<string, number> = {
+  [AI_CPV]: 20,
+  [AI_BATCH_LOT]: 20,
+  [AI_SERIAL]: 20,
+};
+const DEFAULT_MAX_VALUE_LENGTH = 48;
+
+function isSafeValue(ai: string, value: string): boolean {
+  const max = MAX_VALUE_LENGTH[ai] ?? DEFAULT_MAX_VALUE_LENGTH;
+  return value.length >= 1 && value.length <= max && CSET_82.test(value);
+}
 
 export function buildDigitalLinkUri(input: BuildDigitalLinkInput): BuildDigitalLinkResult {
   const gtin = normalizeGtin(input.gtin);
@@ -97,8 +116,12 @@ export function buildDigitalLinkUri(input: BuildDigitalLinkInput): BuildDigitalL
   for (const ai of PATH_QUALIFIER_ORDER) {
     const value = byAi[ai];
     if (value === undefined || value === "") continue;
-    if (!SAFE_VALUE.test(value)) {
-      return { ok: false, reason: "invalid-qualifier", detail: `AI ${ai} value is not URI-safe.` };
+    if (!isSafeValue(ai, value)) {
+      return {
+        ok: false,
+        reason: "invalid-qualifier",
+        detail: `AI ${ai} value is not URI-safe or exceeds ${MAX_VALUE_LENGTH[ai] ?? DEFAULT_MAX_VALUE_LENGTH} characters.`,
+      };
     }
     segments.push(`${ai}/${encodeURIComponent(value)}`);
   }
@@ -106,7 +129,7 @@ export function buildDigitalLinkUri(input: BuildDigitalLinkInput): BuildDigitalL
   const uri = new URL(`${origin.origin}${basePath}/${segments.join("/")}`);
   for (const [ai, value] of Object.entries(input.dataAttributes ?? {})) {
     if (value === "") continue;
-    if (!/^[0-9]{2,4}$/.test(ai) || !SAFE_VALUE.test(value)) {
+    if (!/^[0-9]{2,4}$/.test(ai) || !isSafeValue(ai, value)) {
       return { ok: false, reason: "invalid-qualifier", detail: `AI ${ai} attribute is not valid.` };
     }
     uri.searchParams.set(ai, value);
@@ -124,7 +147,21 @@ export type ParsedDigitalLink = {
 
 export type ParseDigitalLinkResult =
   | { ok: true; value: ParsedDigitalLink }
-  | { ok: false; reason: "not-a-url" | "no-gtin" | "invalid-gtin" };
+  | { ok: false; reason: "not-a-url" | "no-gtin" | "invalid-gtin" | "malformed-encoding" };
+
+/**
+ * `decodeURIComponent` throws a URIError on a truncated or invalid escape such
+ * as `%E0%A4%A`. A parser that reports every other malformed input as a value
+ * must not throw on that one, or a scanned QR code with a damaged tail takes
+ * down the caller instead of being rejected.
+ */
+function decodeSegment(segment: string): string | null {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Read a Digital Link URI back into identifiers. Accepts numeric AIs and the
@@ -147,7 +184,8 @@ export function parseDigitalLinkUri(raw: string): ParseDigitalLinkResult {
     const keyRaw = parts[i].toLowerCase();
     const ai = ALIAS_TO_AI[keyRaw] ?? (/^[0-9]{2,4}$/.test(keyRaw) ? keyRaw : "");
     if (ai === "") continue;
-    const value = decodeURIComponent(parts[i + 1]);
+    const value = decodeSegment(parts[i + 1]);
+    if (value === null) return { ok: false, reason: "malformed-encoding" };
     if (ai === AI_GTIN) gtinRaw = value;
     else qualifiers[ai] = value;
     i += 1; // consume the value segment

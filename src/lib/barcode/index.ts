@@ -68,6 +68,8 @@ const HRI_ASCENT_BPS = 7_200;
 const HRI_ADVANCE_BPS = 6_000;
 /** Clear space between the bottom of the bars and the top of the HRI, in X. */
 const HRI_GAP_X = 1;
+/** Fallback when the caller's human-readable font size is not a usable length. */
+const DEFAULT_HRI_FONT_SIZE_UPT = 7_000_000;
 
 type Metrics = {
   nominalX: Upt;
@@ -166,6 +168,26 @@ function barsFromPattern(
   return bars;
 }
 
+/**
+ * The magnification and the bar height are both vetted before they reach
+ * geometry; the font size was not, and an unusable one propagates. A NaN font
+ * size used to come straight back out as `render.height === NaN` and a NaN
+ * baseline on every text run, which the PDF writer would emit as a broken
+ * number. Same treatment as bar height: substitute, and say so.
+ */
+function resolveFontSize(req: BarcodeRequest, notes: string[]): Upt {
+  const requested = req.humanReadableFontSize;
+  if (!Number.isFinite(requested) || requested <= 0) {
+    if (req.showHumanReadable || req.showLightMarginIndicator) {
+      notes.push(
+        `human-readable font size ${requested} is not usable; ${DEFAULT_HRI_FONT_SIZE_UPT} µpt applied`,
+      );
+    }
+    return DEFAULT_HRI_FONT_SIZE_UPT;
+  }
+  return Math.round(requested);
+}
+
 function hriAscent(fontSize: Upt): Upt {
   return Math.round((fontSize * HRI_ASCENT_BPS) / 10_000);
 }
@@ -247,7 +269,7 @@ function renderEanUpc(
   const bars = barsFromPattern(symbol.pattern, symbol.classes, quietLeft, x, dataHeight, guardHeight);
 
   const text: HumanReadableRun[] = [];
-  const fontSize = req.humanReadableFontSize;
+  const fontSize = resolveFontSize(req, notes);
   const wantsBand = req.showHumanReadable || req.showLightMarginIndicator;
   const baseline = guardHeight + HRI_GAP_X * x + hriAscent(fontSize);
 
@@ -353,7 +375,7 @@ function renderGs1_128(req: BarcodeRequest, notes: string[]): BarcodeResult {
   const bars = barsFromPattern(encoded.symbol.pattern, classes, quiet, x, dataHeight, dataHeight);
 
   const text: HumanReadableRun[] = [];
-  const fontSize = req.humanReadableFontSize;
+  const fontSize = resolveFontSize(req, notes);
   if (req.showHumanReadable) {
     text.push({
       text: encoded.symbol.humanReadable,
@@ -417,7 +439,7 @@ function renderMatrix(req: BarcodeRequest, notes: string[]): BarcodeResult {
   }
 
   const text: HumanReadableRun[] = [];
-  const fontSize = req.humanReadableFontSize;
+  const fontSize = resolveFontSize(req, notes);
   if (req.showHumanReadable) {
     text.push({
       text: encoded.encodedValue,
