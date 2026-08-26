@@ -81,8 +81,10 @@ export type PdfFontInfo = {
   embedded: boolean;
   /** Which FontFile entry carried the program. */
   fontFileKey: "FontFile" | "FontFile2" | "FontFile3" | null;
-  /** Byte length of the embedded program, as stored (usually Flate-compressed). */
+  /** Size of the decompressed font program — the number a prepress operator means. */
   fontFileBytes: number;
+  /** Size of the stream as stored in the file, i.e. after Flate compression. */
+  fontFileStoredBytes: number;
   hasToUnicode: boolean;
   /** For Type0 fonts, the descendant CIDFont subtype. */
   descendantSubtype: string | null;
@@ -152,6 +154,8 @@ export type PdfTextRun = {
 
 /* -------------------------------------------------------------- geometry */
 
+export type PdfClipBox = { x0: number; y0: number; x1: number; y1: number };
+
 export type PdfPaintedExtent = {
   kind: "path" | "text" | "image";
   /** Device-space bounding box in PDF points. */
@@ -161,6 +165,24 @@ export type PdfPaintedExtent = {
   y1: number;
   /** The operator that painted it, e.g. "f", "S", "Tj", "Do". */
   operator: string;
+  /**
+   * Bounding box of the clipping path in effect when the mark was painted, in
+   * device space, or null when nothing was clipping. Bounding box, not the true
+   * region, so it is conservative: a mark reported as inside the clip really is
+   * inside it, a mark reported as outside might still have been clipped by a
+   * non-rectangular path.
+   *
+   * This is what separates "an element was dragged off the artboard" from "an
+   * image is cropped to its frame". Both put operator coordinates outside the
+   * page; only the first loses artwork the designer meant to keep.
+   */
+  clip: PdfClipBox | null;
+  /**
+   * True when the matrix that placed this mark has a negative determinant, i.e.
+   * the mark is mirrored. Live text and placed rasters are never legitimately
+   * mirrored in production artwork; a whole page of mirrored marks is a y-flip.
+   */
+  mirrored: boolean;
 };
 
 export type PdfRect = { x: number; y: number; width: number; height: number };
@@ -176,7 +198,14 @@ export type PdfPageInspection = {
   images: PdfImageInfo[];
   colorSpaces: PdfColorSpaceUsage;
   textRuns: PdfTextRun[];
-  /** All run text joined with newlines, for substring searches. */
+  /**
+   * Run text in reading order: runs grouped into lines by baseline, each line
+   * left to right, lines top to bottom. Content-stream order is paint order,
+   * which for a UPC-A puts the centre digit groups before the number-system and
+   * check digits — so a search of the raw order would not find the number.
+   */
+  textLines: string[];
+  /** `textLines` joined with newlines, for substring searches. */
   textContent: string;
   /** Axis-aligned filled rectangles in device space, PDF points. */
   filledRects: PdfRect[];
@@ -199,7 +228,10 @@ export type PdfOutputIntentInfo = {
   info: string;
   /** True when an actual ICC profile stream is attached, not just a name. */
   hasDestOutputProfile: boolean;
+  /** Decompressed size of the ICC profile — comparable with the .icc on disk. */
   destOutputProfileBytes: number;
+  /** Size of the stream as stored in the file, after Flate compression. */
+  destOutputProfileStoredBytes: number;
 };
 
 export type PdfInspection = {
@@ -224,13 +256,29 @@ export type PdfInspection = {
 
 const PT_PER_IN = 72;
 
-/** A PDF box may be written with either corner first; normalise it. */
-function toBox(arr: PDFArray | undefined): PdfBox | null {
-  if (!arr || arr.size() < 4) return null;
+/**
+ * A PDF box may be written with either corner first; normalise it.
+ *
+ * A malformed array is reported as a missing box plus a warning, never as an
+ * exception: this module's contract is that a file it cannot understand yields
+ * measurements it flags as unreadable, so `validate.ts` can FAIL it. Throwing
+ * here would abort the whole report and, through the CLI, turn a corrupt press
+ * file into an exit code that means "you typed the command wrong".
+ */
+function toBox(arr: PDFArray | undefined, label: string, warnings: string[]): PdfBox | null {
+  if (!arr) return null;
+  if (arr.size() < 4) {
+    warnings.push(`${label} has ${arr.size()} entries, not 4`);
+    return null;
+  }
   const nums: number[] = [];
   for (let i = 0; i < 4; i += 1) {
-    const n = arr.lookup(i, PDFNumber);
-    nums.push(n.asNumber());
+    const n = numberValue(arr.lookup(i));
+    if (n === null || !Number.isFinite(n)) {
+      warnings.push(`${label} entry ${i} is not a number`);
+      return null;
+    }
+    nums.push(n);
   }
   const [a, b, c, d] = nums as [number, number, number, number];
   const x0 = Math.min(a, c);
@@ -690,12 +738,14 @@ function buildFontModel(resourceName: string, dict: PDFDict, warnings: string[])
 
   let fontFileKey: PdfFontInfo["fontFileKey"] = null;
   let fontFileBytes = 0;
+  let fontFileStoredBytes = 0;
   if (descriptor) {
     for (const key of ["FontFile", "FontFile2", "FontFile3"] as const) {
       const s = descriptor.lookupMaybe(PDFName.of(key), PDFStream);
       if (s) {
         fontFileKey = key;
-        fontFileBytes = s.getContentsSize();
+        fontFileStoredBytes = s.getContentsSize();
+        fontFileBytes = streamBytes(s, warnings).length;
         break;
       }
     }
@@ -736,6 +786,7 @@ function buildFontModel(resourceName: string, dict: PDFDict, warnings: string[])
     embedded: fontFileKey !== null,
     fontFileKey,
     fontFileBytes,
+    fontFileStoredBytes,
     hasToUnicode: toUnicodeStream !== undefined,
     descendantSubtype,
   };
@@ -756,6 +807,8 @@ function buildFontModel(resourceName: string, dict: PDFDict, warnings: string[])
 
 type GState = {
   ctm: Mat;
+  /** Bounding box of the clip path in effect, device space. null = unclipped. */
+  clip: PdfClipBox | null;
   fillSpace: string;
   strokeSpace: string;
   font: FontModel | null;
@@ -770,7 +823,22 @@ type GState = {
 };
 
 function cloneState(s: GState): GState {
-  return { ...s, ctm: [...s.ctm] as Mat };
+  return { ...s, ctm: [...s.ctm] as Mat, clip: s.clip ? { ...s.clip } : null };
+}
+
+/** Determinant of a PDF affine. Negative means the placement is mirrored. */
+function determinant(m: Mat): number {
+  return m[0] * m[3] - m[1] * m[2];
+}
+
+function intersectClip(a: PdfClipBox | null, b: PdfClipBox): PdfClipBox {
+  if (!a) return { ...b };
+  return {
+    x0: Math.max(a.x0, b.x0),
+    y0: Math.max(a.y0, b.y0),
+    x1: Math.min(a.x1, b.x1),
+    y1: Math.min(a.y1, b.y1),
+  };
 }
 
 type PageAccum = {
@@ -793,6 +861,37 @@ const DEVICE_SPACE_OPS: Record<string, string> = {
   K: "DeviceCMYK",
 };
 
+/**
+ * Family name for a colour-space object.
+ *
+ * ICCBased is expanded to its component count — "ICCBased-RGB" and
+ * "ICCBased-CMYK" are very different things in a print workflow and a check
+ * that lumped them together as "ICCBased" would be useless.
+ */
+function colorSpaceFamily(entry: unknown): string {
+  if (entry instanceof PDFName) return entry.decodeText();
+  if (entry instanceof PDFArray && entry.size() > 0) {
+    const family = nameValue(entry.lookup(0)) ?? "unknown";
+    if (family === "ICCBased") {
+      const profile = entry.lookupMaybe(1, PDFStream);
+      const n = profile ? numberValue(profile.dict.lookup(PDFName.of("N"))) : null;
+      if (n === 1) return "ICCBased-Gray";
+      if (n === 3) return "ICCBased-RGB";
+      if (n === 4) return "ICCBased-CMYK";
+      return "ICCBased";
+    }
+    // An /Indexed space paints in its BASE space; the palette is just a lookup.
+    // Reporting a bare "Indexed" would hide an RGB palette from the CMYK
+    // workflow check, which is the whole point of naming the space at all.
+    if (family === "Indexed" || family === "I") {
+      const base = entry.size() > 1 ? colorSpaceFamily(entry.lookup(1)) : "unknown";
+      return `Indexed-${base}`;
+    }
+    return family;
+  }
+  return "unknown";
+}
+
 /** Resolve a `cs`/`CS` operand to a colour-space family name. */
 function resolveColorSpaceName(name: string, resources: PDFDict | undefined): string {
   if (
@@ -805,19 +904,64 @@ function resolveColorSpaceName(name: string, resources: PDFDict | undefined): st
   }
   const csDict = resources?.lookupMaybe(PDFName.of("ColorSpace"), PDFDict);
   const entry = csDict?.lookup(PDFName.of(name));
-  if (entry instanceof PDFName) return entry.decodeText();
-  if (entry instanceof PDFArray && entry.size() > 0) {
-    const family = nameValue(entry.lookup(0));
-    if (family) return family;
-  }
-  return name;
+  if (entry === undefined) return name;
+  const family = colorSpaceFamily(entry);
+  return family === "unknown" ? name : family;
 }
 
-const PAINT_OPS = new Set(["S", "s", "f", "F", "f*", "B", "B*", "b", "b*"]);
 const FILL_OPS = new Set(["f", "F", "f*", "B", "B*", "b", "b*"]);
 
-/** A bar in a vector barcode: taller than wide, and never wider than 3 pt. */
-const BAR_MAX_WIDTH_PT = 3;
+/** Device-space coordinates are rounded to 1e-6 pt by the writer; match that. */
+const COORD_EPSILON = 1e-5;
+
+/**
+ * A subpath that is an axis-aligned rectangle, or null.
+ *
+ * Needed because a rectangle reaches the file two different ways: as `re`, and
+ * as the `m l l l h` the shared rounded-rect path emits when the radius is 0.
+ * Barcode bars take the second route, so a bar counter that only knew about
+ * `re` would report zero bars for a perfectly good barcode.
+ */
+function asAxisAlignedRect(points: ReadonlyArray<[number, number]>): PdfRect | null {
+  const pts: Array<[number, number]> = [];
+  for (const p of points) {
+    const last = pts[pts.length - 1];
+    if (last && Math.abs(last[0] - p[0]) < COORD_EPSILON && Math.abs(last[1] - p[1]) < COORD_EPSILON) {
+      continue;
+    }
+    pts.push(p);
+  }
+  // A closing `h` repeats the start point; drop it before counting corners.
+  if (pts.length === 5) {
+    const first = pts[0];
+    const last = pts[4];
+    if (Math.abs(first[0] - last[0]) < COORD_EPSILON && Math.abs(first[1] - last[1]) < COORD_EPSILON) {
+      pts.pop();
+    }
+  }
+  if (pts.length !== 4) return null;
+
+  const xs = [...new Set(pts.map((p) => Math.round(p[0] / COORD_EPSILON)))];
+  const ys = [...new Set(pts.map((p) => Math.round(p[1] / COORD_EPSILON)))];
+  if (xs.length !== 2 || ys.length !== 2) return null;
+
+  const x0 = Math.min(...pts.map((p) => p[0]));
+  const x1 = Math.max(...pts.map((p) => p[0]));
+  const y0 = Math.min(...pts.map((p) => p[1]));
+  const y1 = Math.max(...pts.map((p) => p[1]));
+  return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+}
+
+/**
+ * Shape test for a barcode bar: at least three times taller than it is wide,
+ * and no wider than 12 pt. A UPC-A at the GS1 maximum 200 % magnification has a
+ * widest (four-module) bar of 7.5 pt against a 147 pt bar height, so the bounds
+ * are comfortable; a page background or a quiet-zone panel is nowhere near
+ * three-to-one. This is a heuristic and is reported as `barLikeRectCount`, never
+ * as "the number of bars".
+ */
+const BAR_MIN_ASPECT = 3;
+const BAR_MAX_WIDTH_PT = 12;
 
 function interpret(
   content: Uint8Array,
@@ -833,9 +977,10 @@ function interpret(
   const stack: GState[] = [];
   const operands: Tok[] = [];
 
-  // Path state: points of the current subpath, in device space.
-  let pathPoints: Array<[number, number]> = [];
-  let pathRects: PdfRect[] = [];
+  // Path state, in device space. Subpaths are kept separate because a filled
+  // rectangle is recognised per subpath: the writer emits a barcode's bars as
+  // many `m l l l h` subpaths inside one path, closed by a single `f`.
+  let subpaths: Array<Array<[number, number]>> = [];
   let currentPoint: [number, number] = [0, 0];
   let startPoint: [number, number] = [0, 0];
 
@@ -848,42 +993,52 @@ function interpret(
     return t && t.t === "num" ? t.v : 0;
   };
 
+  const appendPoint = (p: [number, number]): void => {
+    if (subpaths.length === 0) subpaths.push([]);
+    subpaths[subpaths.length - 1].push(p);
+  };
   const moveTo = (x: number, y: number): void => {
     const p = apply(gs.ctm, x, y);
-    pathPoints.push(p);
+    subpaths.push([p]);
     currentPoint = p;
     startPoint = p;
   };
   const lineTo = (x: number, y: number): void => {
     const p = apply(gs.ctm, x, y);
-    pathPoints.push(p);
+    appendPoint(p);
     currentPoint = p;
   };
   const curveTo = (pts: Array<[number, number]>): void => {
     // Control points bound the curve, so using them is conservative and exact
     // enough for a "did anything leave the page" test.
-    for (const [x, y] of pts) pathPoints.push(apply(gs.ctm, x, y));
+    for (const [x, y] of pts) appendPoint(apply(gs.ctm, x, y));
     const last = pts[pts.length - 1];
     currentPoint = apply(gs.ctm, last[0], last[1]);
   };
 
   const paintPath = (op: string): void => {
-    if (pathPoints.length > 0) {
-      let x0 = Infinity;
-      let y0 = Infinity;
-      let x1 = -Infinity;
-      let y1 = -Infinity;
-      for (const [x, y] of pathPoints) {
+    let x0 = Infinity;
+    let y0 = Infinity;
+    let x1 = -Infinity;
+    let y1 = -Infinity;
+    let hasPoints = false;
+    for (const sp of subpaths) {
+      for (const [x, y] of sp) {
+        hasPoints = true;
         if (x < x0) x0 = x;
         if (y < y0) y0 = y;
         if (x > x1) x1 = x;
         if (y > y1) y1 = y;
       }
-      acc.paintedExtents.push({ kind: "path", x0, y0, x1, y1, operator: op });
     }
-    if (FILL_OPS.has(op)) for (const r of pathRects) acc.filledRects.push(r);
-    pathPoints = [];
-    pathRects = [];
+    if (hasPoints) acc.paintedExtents.push({ kind: "path", x0, y0, x1, y1, operator: op });
+    if (FILL_OPS.has(op)) {
+      for (const sp of subpaths) {
+        const r = asAxisAlignedRect(sp);
+        if (r) acc.filledRects.push(r);
+      }
+    }
+    subpaths = [];
   };
 
   const showText = (bytes: Uint8Array, adjustments: number[] = []): void => {
@@ -1013,7 +1168,7 @@ function interpret(
         ]);
         break;
       case "h":
-        pathPoints.push(startPoint);
+        appendPoint(startPoint);
         currentPoint = startPoint;
         break;
       case "re": {
@@ -1021,18 +1176,14 @@ function interpret(
         const y = num(-3);
         const w = num(-2);
         const h = num(-1);
-        const c0 = apply(gs.ctm, x, y);
-        const c1 = apply(gs.ctm, x + w, y);
-        const c2 = apply(gs.ctm, x + w, y + h);
-        const c3 = apply(gs.ctm, x, y + h);
-        pathPoints.push(c0, c1, c2, c3);
-        currentPoint = c0;
-        startPoint = c0;
-        const rx0 = Math.min(c0[0], c1[0], c2[0], c3[0]);
-        const ry0 = Math.min(c0[1], c1[1], c2[1], c3[1]);
-        const rx1 = Math.max(c0[0], c1[0], c2[0], c3[0]);
-        const ry1 = Math.max(c0[1], c1[1], c2[1], c3[1]);
-        pathRects.push({ x: rx0, y: ry0, width: rx1 - rx0, height: ry1 - ry0 });
+        subpaths.push([
+          apply(gs.ctm, x, y),
+          apply(gs.ctm, x + w, y),
+          apply(gs.ctm, x + w, y + h),
+          apply(gs.ctm, x, y + h),
+        ]);
+        currentPoint = apply(gs.ctm, x, y);
+        startPoint = currentPoint;
         break;
       }
       case "S":
@@ -1048,8 +1199,7 @@ function interpret(
         break;
       case "n":
         // No-op painting: this is the `W n` clip idiom. Nothing is inked.
-        pathPoints = [];
-        pathRects = [];
+        subpaths = [];
         break;
 
       case "g":
@@ -1266,6 +1416,35 @@ function interpret(
   }
 }
 
+/**
+ * Group text runs into visual lines and order them the way a reader would.
+ *
+ * Runs share a line when their baselines agree to within a quarter of the
+ * larger font size — tight enough to keep separate lines apart at normal
+ * leading, loose enough to survive the sub-point baseline differences that come
+ * from mixing sizes on one line.
+ */
+function toReadingOrder(runs: readonly PdfTextRun[]): string[] {
+  if (runs.length === 0) return [];
+  const lines: Array<{ y: number; size: number; runs: PdfTextRun[] }> = [];
+  for (const run of runs) {
+    const tol = Math.max(run.fontSizePt, 1) * 0.25;
+    const hit = lines.find(
+      (l) => Math.abs(l.y - run.yPt) <= Math.max(tol, Math.max(l.size, 1) * 0.25),
+    );
+    if (hit) {
+      hit.runs.push(run);
+      hit.size = Math.max(hit.size, run.fontSizePt);
+    } else {
+      lines.push({ y: run.yPt, size: run.fontSizePt, runs: [run] });
+    }
+  }
+  lines.sort((a, b) => b.y - a.y);
+  return lines.map((l) =>
+    [...l.runs].sort((a, b) => a.xPt - b.xPt).map((r) => r.text).join(" "),
+  );
+}
+
 /* ------------------------------------------------------------ page walk */
 
 function inspectPage(
@@ -1276,13 +1455,15 @@ function inspectPage(
   const page = doc.getPages()[index];
   const node = page.node;
 
+  const pageWarnings: string[] = [];
+
   const mediaArr = node.MediaBox();
   const boxes: PdfPageBoxes = {
-    mediaBox: toBox(mediaArr),
-    cropBox: toBox(node.CropBox()),
-    bleedBox: toBox(node.BleedBox()),
-    trimBox: toBox(node.TrimBox()),
-    artBox: toBox(node.ArtBox()),
+    mediaBox: toBox(mediaArr, "MediaBox", pageWarnings),
+    cropBox: toBox(node.CropBox(), "CropBox", pageWarnings),
+    bleedBox: toBox(node.BleedBox(), "BleedBox", pageWarnings),
+    trimBox: toBox(node.TrimBox(), "TrimBox", pageWarnings),
+    artBox: toBox(node.ArtBox(), "ArtBox", pageWarnings),
     present: {
       mediaBox: node.has(PDFName.of("MediaBox")),
       cropBox: node.has(PDFName.of("CropBox")),
@@ -1293,7 +1474,6 @@ function inspectPage(
   };
 
   const resources = node.Resources();
-  const pageWarnings: string[] = [];
 
   // Concatenate every content stream: a page's streams are one stream that
   // happens to be split, and an operator may straddle the join only in badly
@@ -1371,10 +1551,10 @@ function inspectPage(
       if (nameValue(s.dict.lookup(PDFName.of("Subtype"))) !== "Image") continue;
       const name = key.decodeText();
       const csEntry = s.dict.lookup(PDFName.of("ColorSpace"));
-      let cs = "unknown";
-      if (csEntry instanceof PDFName) cs = csEntry.decodeText();
-      else if (csEntry instanceof PDFArray && csEntry.size() > 0) {
-        cs = nameValue(csEntry.lookup(0)) ?? "unknown";
+      let cs = colorSpaceFamily(csEntry);
+      if (cs !== "unknown" && !cs.startsWith("Device") && !cs.startsWith("ICCBased")) {
+        // A named entry points at /Resources /ColorSpace; resolve it through.
+        cs = resolveColorSpaceName(cs, resources);
       }
       imageSpaces.add(cs);
       const filterEntry = s.dict.lookup(PDFName.of("Filter"));
@@ -1419,8 +1599,10 @@ function inspectPage(
     }
   }
 
+  const textLines = toReadingOrder(acc.textRuns);
+
   const barLike = acc.filledRects.filter(
-    (r) => r.width > 0 && r.height > r.width && r.width <= BAR_MAX_WIDTH_PT,
+    (r) => r.width > 0 && r.height >= r.width * BAR_MIN_ASPECT && r.width <= BAR_MAX_WIDTH_PT,
   ).length;
 
   for (const w of pageWarnings) warnings.push(`page ${index + 1}: ${w}`);
@@ -1438,7 +1620,8 @@ function inspectPage(
       imageSpaces: [...imageSpaces].sort(),
     },
     textRuns: acc.textRuns,
-    textContent: acc.textRuns.map((r) => r.text).join("\n"),
+    textLines,
+    textContent: textLines.join("\n"),
     filledRects: acc.filledRects,
     barLikeRectCount: barLike,
     paintedExtents: acc.paintedExtents,
@@ -1490,7 +1673,8 @@ export async function inspectPdf(bytes: Uint8Array): Promise<PdfInspection> {
         registryName: stringValue(oi.lookup(PDFName.of("RegistryName"))) ?? "",
         info: stringValue(oi.lookup(PDFName.of("Info"))) ?? "",
         hasDestOutputProfile: profile !== undefined,
-        destOutputProfileBytes: profile ? profile.getContentsSize() : 0,
+        destOutputProfileBytes: profile ? streamBytes(profile, warnings).length : 0,
+        destOutputProfileStoredBytes: profile ? profile.getContentsSize() : 0,
       });
     }
   }

@@ -316,6 +316,19 @@ describe("redact", () => {
     expect(hostOf("https://api.gs1us.test/verified/v1")).toBe("api.gs1us.test");
   });
 
+  it("keeps a hostile __proto__ key as data instead of letting it replace a prototype", () => {
+    // A third-party payload is untrusted input. Plain assignment invokes the
+    // `__proto__` setter, which replaced the prototype of the redacted copy
+    // with attacker-supplied values and dropped the branch from the audit row.
+    const hostile: unknown = JSON.parse('{"__proto__":{"injected":"yes","apiKey":"leak"},"gtin":"1"}');
+    const out = redact(hostile) as Record<string, unknown>;
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect(out.injected).toBeUndefined();
+    expect(Object.keys(out)).toContain("__proto__");
+    expect(redactToJson(hostile)).not.toContain("leak");
+    expect(({} as Record<string, unknown>).injected).toBeUndefined();
+  });
+
   it("scrubs registered literal secrets wherever they appear", () => {
     const out = redactToJson({ note: `remote echoed ${SECRET} back at us` }, { secrets: [SECRET] });
     expect(out).not.toContain(SECRET);
@@ -342,6 +355,12 @@ describe("gtin", () => {
     expect(normalizeGtin("81079703012X")).toMatchObject({ ok: false, reason: "non-digit" });
     expect(normalizeGtin("8107970")).toMatchObject({ ok: false, reason: "bad-length" });
     expect(normalizeGtin("810797030125")).toMatchObject({ ok: false, reason: "bad-check-digit" });
+    // A leading "-" is a sign, not a separator: a negated spreadsheet cell must
+    // not be silently cleaned into a valid identifier.
+    expect(normalizeGtin("-810797030124")).toMatchObject({ ok: false, reason: "non-digit" });
+    expect(normalizeGtin("810797030124.")).toMatchObject({ ok: false, reason: "non-digit" });
+    // Separators between digits are still stripped.
+    expect(normalizeGtin("810-797-030124").ok).toBe(true);
   });
 });
 
@@ -436,6 +455,11 @@ describe("getAdapter", () => {
     expect(getAdapter(makeConfig({ enabled: false }), { fetch: fetchFn }).provider).toBe("disabled");
     expect(getAdapter(makeConfig({ baseUrl: "" }), { fetch: fetchFn }).provider).toBe("disabled");
     expect(getAdapter(makeConfig({ credential: "" }), { fetch: fetchFn }).provider).toBe("disabled");
+    // A base URL with no scheme would otherwise build a live adapter that fails
+    // with NETWORK on every product instead of saying what is wrong once.
+    expect(getAdapter(makeConfig({ baseUrl: "api.gs1us.test/verified" }), { fetch: fetchFn }).provider).toBe(
+      "disabled",
+    );
   });
 
   it("builds a live adapter when the connection is complete", () => {
@@ -875,5 +899,191 @@ describe("applyAcceptedFields", () => {
     const out = applyAcceptedFields(local, diffs, []);
     expect(out.applied).toEqual([]);
     expect(out.context).toEqual(local);
+  });
+});
+
+/* ------------------------------------------------- adversarial regressions */
+
+/**
+ * Each case here is a defect that shipped and was fixed. They are grouped
+ * because they share one theme: a third party (or a malformed input) must never
+ * be able to make this module invent an answer, hang, or write outside itself.
+ */
+describe("regressions — the adapter must not invent an answer", () => {
+  const JUNK_2XX_BODIES = ["", "{}", "[]", "null", '{"data":null}', '"a string"', "123", '{"message":"degraded"}'];
+
+  it("refuses a 2xx that carries no recognisable record instead of fabricating one", async () => {
+    for (const body of JUNK_2XX_BODIES) {
+      const { adapter } = harness([makeResponse(200, body)]);
+      const fetched = await adapter.fetchProduct(UPC12);
+      expect(fetched.ok, `fetchProduct should not succeed on body ${JSON.stringify(body)}`).toBe(false);
+      if (!fetched.ok) expect(fetched.error.code).toBe("BAD_RESPONSE");
+    }
+  });
+
+  it("never reports 'verified' on the strength of a 2xx alone", async () => {
+    // A GTIN's licence status is a compliance claim. A 200 whose body says
+    // nothing about the GTIN does not support it, and answering "verified"
+    // there would write a fact into gs1_sync_records that GS1 never stated.
+    for (const body of JUNK_2XX_BODIES) {
+      const { adapter } = harness([makeResponse(200, body)]);
+      const verified = await adapter.verifyGtin(UPC12);
+      expect(verified.ok, `verifyGtin should not succeed on body ${JSON.stringify(body)}`).toBe(false);
+      if (!verified.ok) expect(verified.error.code).toBe("BAD_RESPONSE");
+    }
+  });
+
+  it("still maps a payload that has real content but omits the GTIN", async () => {
+    // The evidence check must not cost the mapper its tolerance: a record keyed
+    // only on descriptive fields is still a record, and takes the requested GTIN.
+    const { adapter } = harness([makeResponse(200, JSON.stringify({ brandName: "Axle Teknology" }))]);
+    const result = await adapter.fetchProduct(UPC12);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.gtin).toBe(GTIN14);
+    expect(result.value.brandName).toBe("Axle Teknology");
+  });
+
+  it("rejects a record that describes a different GTIN than the one requested", async () => {
+    const other = JSON.stringify({ gtin: "00012345678905", brandName: "Someone Else" });
+    const { adapter } = harness([makeResponse(200, other)]);
+    const result = await adapter.fetchProduct(UPC12);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("BAD_RESPONSE");
+    expect(result.error.message).toContain("00012345678905");
+
+    const { adapter: verifier } = harness([makeResponse(200, other)]);
+    const verified = await verifier.verifyGtin(UPC12);
+    expect(verified.ok).toBe(false);
+  });
+
+  it("reports a 1xx/3xx as BAD_RESPONSE, not as a payload the operator should fix", async () => {
+    const { adapter } = harness([makeResponse(302, "")]);
+    const result = await adapter.fetchProduct(UPC12);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("BAD_RESPONSE");
+      expect(result.error.message).toContain("302");
+    }
+  });
+
+  it("substitutes every {gtin} placeholder in a configured path", async () => {
+    const { adapter, state } = harness([makeResponse(200, JSON.stringify(VERIFIED_BY_GS1_PAYLOAD))], {
+      paths: { test: "/v1/health", verify: "/v1/gtins/{gtin}", product: "/v1/{gtin}/related/{gtin}", publish: "/v1/products" },
+    });
+    await adapter.fetchProduct(UPC12);
+    expect(state.calls[0].url).toBe(`https://api.gs1us.test/verified/v1/${GTIN14}/related/${GTIN14}`);
+  });
+
+  it("enforces timeoutMs itself, even when the fetch implementation ignores the abort signal", async () => {
+    // The previous implementation only aborted the controller. A fetch that does
+    // not honour `signal` — a polyfill, a gateway wrapper — left the adapter
+    // awaiting a promise that never settled, and a batch job hung forever.
+    const adapter = createGs1UsAdapter(
+      makeConfig({
+        timeoutMs: 100,
+        retry: { maxAttempts: 1, baseBackoffMs: 1, maxBackoffMs: 2, jitterRatio: 0, maxRetryAfterMs: 100 },
+      }),
+      { fetch: () => new Promise<Gs1FetchResponse>(() => {}), sleep: async () => {} },
+    );
+    const outcome = await Promise.race([
+      adapter.fetchProduct(UPC12).then((r) => (r.ok ? "ok" : r.error.code)),
+      new Promise<string>((resolve) => setTimeout(() => resolve("never-returned"), 2_000)),
+    ]);
+    expect(outcome).toBe("TIMEOUT");
+  });
+
+  it("honours an explicit rejection in a 2xx publish body", async () => {
+    const { adapter } = harness([makeResponse(200, '{"accepted":false,"status":"REJECTED","messages":["bad prefix"]}')], {
+      provider: "gs1us-datahub",
+    });
+    const result = await adapter.publishProduct(mapFixtureRecord());
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.accepted).toBe(false);
+  });
+});
+
+describe("regressions — malformed input is a value, never a throw or a hang", () => {
+  it("reports a malformed percent-escape in a Digital Link instead of throwing URIError", () => {
+    expect(() => parseDigitalLinkUri(`https://id.gs1.org/01/${GTIN14}/10/%E0%A4%A`)).not.toThrow();
+    expect(parseDigitalLinkUri(`https://id.gs1.org/01/${GTIN14}/10/%E0%A4%A`)).toMatchObject({
+      ok: false,
+      reason: "malformed-encoding",
+    });
+  });
+
+  it("caps path qualifiers at the length GS1 defines for the AI", () => {
+    expect(buildDigitalLinkUri({ gtin: UPC12, qualifiers: { serial: "S".repeat(21) } })).toMatchObject({
+      ok: false,
+      reason: "invalid-qualifier",
+    });
+    expect(buildDigitalLinkUri({ gtin: UPC12, qualifiers: { serial: "S".repeat(20) } }).ok).toBe(true);
+  });
+
+  it("terminates when a registered secret is a substring of the redaction marker", () => {
+    // `while (out.includes(secret)) out = out.replace(secret, REDACTED)` spun
+    // forever for any secret contained in "[redacted]", pinning a core and
+    // blocking the event loop of the whole server.
+    for (const secret of ["redacted", "[redacted", "redacted]", "[redacted]"]) {
+      const out = redactString(`prefix ${secret} suffix`, { secrets: [secret] });
+      expect(out).toBe(`prefix ${REDACTED} suffix`);
+    }
+  });
+
+  it("rejects an odd-length hex ciphertext rather than silently dropping a nibble", () => {
+    const bad = decryptCredential({ ciphertext: "abc", iv: "0".repeat(24), tag: "0".repeat(32) }, { key: KEY_A });
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.code).toBe("PAYLOAD_MALFORMED");
+  });
+});
+
+describe("regressions — diff and apply stay inside the context", () => {
+  it("writes each dimension with its own unit when the registry mixes them", () => {
+    // Hoisting the first unit onto all three printed a height of 200 mm as
+    // "200 INH" — wrong by a factor of 25.4, on a card that goes to press.
+    const mixed = mapGs1ProductRecord(
+      {
+        gtin: GTIN14,
+        tradeItemMeasurements: {
+          width: { value: 4.5, unitCode: "INH" },
+          height: { value: 200, unitCode: "MMT" },
+          depth: { value: 1, unitCode: "INH" },
+        },
+      },
+      "",
+      "custom",
+      "2026-08-26T00:00:00.000Z",
+      {},
+    );
+    if (mixed === null) throw new Error("setup");
+    const diffs = diffRemoteAgainstLocal(mixed, emptyProductContext());
+    expect(diffs.find((d) => d.path === "custom.gs1Dimensions")?.remoteValue).toBe("4.5 INH x 200 MMT x 1 INH");
+    // A consistent set still reads as one measurement with one unit.
+    expect(
+      diffRemoteAgainstLocal(mapFixtureRecord(), emptyProductContext()).find(
+        (d) => d.path === "custom.gs1Dimensions",
+      )?.remoteValue,
+    ).toBe("4.5 x 7.25 x 1.125 INH");
+  });
+
+  it("refuses a path that names a prototype instead of data", () => {
+    const local = emptyProductContext();
+    const forged = [
+      {
+        path: "__proto__.polluted",
+        label: "forged",
+        remoteField: "brandName",
+        localValue: "",
+        remoteValue: "yes",
+        kind: "missing-locally" as const,
+        overwritesLocal: false,
+        acceptable: true,
+      },
+    ];
+    const out = applyAcceptedFields(local, forged, ["__proto__.polluted"]);
+    expect(out.applied).toEqual([]);
+    expect(out.rejected).toEqual([{ path: "__proto__.polluted", reason: "unwritable-path" }]);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 });

@@ -15,7 +15,10 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "e2e": "playwright test",
-    "fonts:metrics": "tsx scripts/gen-font-metrics.ts"
+    "fonts:metrics": "tsx scripts/gen-font-metrics.ts",
+    "import:workbook": "tsx --env-file-if-exists=.env.local scripts/import-workbook.ts",
+    "seed:benchmark": "tsx --env-file-if-exists=.env.local scripts/seed-benchmark.ts",
+    "seed:assets": "tsx --env-file-if-exists=.env.local scripts/seed-assets.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",

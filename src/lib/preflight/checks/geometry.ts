@@ -10,6 +10,7 @@ import {
   type Rect,
 } from "@/lib/geometry/types";
 import { CARD_PRESETS, bleedRect } from "@/lib/geometry/presets";
+import { defaultElementName } from "@/lib/design/schema";
 import type { DrawOp } from "@/lib/design/render";
 import type { PreflightFinding } from "../types";
 import {
@@ -277,21 +278,60 @@ function safeOverhang(bounds: Rect, safe: Rect) {
 /**
  * Is this box inside the live area of the card?
  *
- * The test is `roundedRectContains` against the safe rect carrying the preset's
- * trim corner radius. A rounded card has no ink in the corner arc, so a box that
- * sits inside the safe *rectangle* but pokes into a corner is outside the card
- * even though every edge test passes. Using the trim radius on the inset box is
- * deliberately conservative — the true offset arc is smaller — which costs a
- * few thousandths of an inch diagonally in each corner and never misses a
- * violation.
+ * The safe area is the trim shape inset on all four sides, so its own corner
+ * radius is the trim radius less that inset — see safeCornerRadius() in
+ * lib/geometry/presets.ts. Testing with the trim radius instead would reject a
+ * box that is comfortably on the card.
  */
 function insideSafe(ctx: PreflightContext, bounds: Rect): boolean {
-  return roundedRectContains(ctx.plan.safe, ctx.plan.cornerRadius, bounds);
+  return roundedRectContains(ctx.plan.safe, ctx.plan.safeCornerRadius, bounds);
 }
 
 function cornerCase(ctx: PreflightContext, bounds: Rect): boolean {
-  // Inside every straight edge but still outside the card: the corner arc did it.
+  // Inside every straight edge, but a corner of the box pokes past the safe
+  // area's own arc.
   return rectContains(ctx.plan.safe, bounds) && !insideSafe(ctx, bounds);
+}
+
+/**
+ * How far past the trim line does the box actually go?
+ *
+ * A corner-only overrun is a different animal from crossing an edge. The box is
+ * still inside the card — it is only closer to the cut than the safe inset asks
+ * for, by a fraction of that inset, and that happens to ANY element laid out to
+ * the full safe width because the corners of its bounding box are the extreme
+ * points. Grading that as an error would flag every reasonable layout, so it is
+ * reported as a warning with the measured shortfall, and only content that
+ * genuinely crosses the trim is an error.
+ */
+function crossesTrim(ctx: PreflightContext, bounds: Rect): boolean {
+  return !roundedRectContains(ctx.plan.trim, ctx.plan.cornerRadius, bounds);
+}
+
+/** Shortfall at the worst corner, in µpt: how much closer to the cut than asked. */
+function cornerShortfall(ctx: PreflightContext, bounds: Rect): number {
+  const safe = ctx.plan.safe;
+  const r = ctx.plan.safeCornerRadius;
+  if (r <= 0) return 0;
+  const x1 = safe.x + safe.w;
+  const y1 = safe.y + safe.h;
+  const bx1 = bounds.x + bounds.w;
+  const by1 = bounds.y + bounds.h;
+  const corners: Array<[number, number, number, number, -1 | 1, -1 | 1]> = [
+    [safe.x + r, safe.y + r, bounds.x, bounds.y, -1, -1],
+    [x1 - r, safe.y + r, bx1, bounds.y, 1, -1],
+    [x1 - r, y1 - r, bx1, by1, 1, 1],
+    [safe.x + r, y1 - r, bounds.x, by1, -1, 1],
+  ];
+  let worst = 0;
+  for (const [cx, cy, px, py, sx, sy] of corners) {
+    const dx = px - cx;
+    const dy = py - cy;
+    if (dx * sx <= 0 || dy * sy <= 0) continue;
+    const d = Math.hypot(dx, dy);
+    if (d > r) worst = Math.max(worst, Math.round(d - r));
+  }
+  return worst;
 }
 
 export function checkSafeArea(ctx: PreflightContext): PreflightFinding[] {
@@ -313,20 +353,29 @@ export function checkSafeArea(ctx: PreflightContext): PreflightFinding[] {
       out.push(
         finding({
           code: "SAFE_AREA_TEXT",
-          severity: "error",
+          severity: cornerCase(ctx, bounds) && !crossesTrim(ctx, bounds) ? "warning" : "error",
           title: cornerCase(ctx, bounds)
-            ? "Text runs into the rounded corner of the card"
+            ? crossesTrim(ctx, bounds)
+              ? "Text runs off the rounded corner of the card"
+              : "Text sits closer to the cut than the safe margin allows"
             : "Text is outside the safe area",
           detail: cornerCase(ctx, bounds)
-            ? `The type sits inside the safe rectangle on every edge but crosses the ` +
-              `${inches(ctx.plan.cornerRadius)} corner radius, so part of the line falls where the card ` +
-              `has no material. Ink bounds ${inches(bounds.w)} × ${inches(bounds.h)} at ` +
+            ? `The type is inside the safe rectangle on every edge, but a corner of its ink bounds ` +
+              `passes the safe area's own ${inches(ctx.plan.safeCornerRadius)} corner radius by ` +
+              `${inches(cornerShortfall(ctx, bounds))}` +
+              (crossesTrim(ctx, bounds)
+                ? ` and reaches past the ${inches(ctx.plan.cornerRadius)} trim corner, so part of the ` +
+                  `line falls where the card has no material.`
+                : `. It is still on the card — the ${inches(ctx.plan.cornerRadius)} trim corner is ` +
+                  `clear — but the margin to the cut is smaller there than the ` +
+                  `${inches(safe.x - ctx.plan.trim.x)} this preset asks for.`) +
+              ` Ink bounds ${inches(bounds.w)} × ${inches(bounds.h)} at ` +
               `(${inches(bounds.x)}, ${inches(bounds.y)}).`
             : `The type reaches past the safe area by ${describeShortfall(gaps)}. The safe area is ` +
               `${inches(safe.w)} × ${inches(safe.h)}, inset ${inches(safe.x - ctx.plan.trim.x)} from trim.`,
           remedy:
             `Move or re-wrap the text so its ink bounds sit inside ${inches(safe.w)} × ${inches(safe.h)} ` +
-            `at (${inches(safe.x)}, ${inches(safe.y)}), clear of the ${inches(ctx.plan.cornerRadius)} ` +
+            `at (${inches(safe.x)}, ${inches(safe.y)}), clear of the ${inches(ctx.plan.safeCornerRadius)} ` +
             `corners. Shrinking the frame with auto-fit off will re-wrap rather than clip.`,
           ...at(ctx, op.elementId, bounds),
           measurements: {
@@ -335,6 +384,7 @@ export function checkSafeArea(ctx: PreflightContext): PreflightFinding[] {
             overRightIn: inNum(gaps.right),
             overBottomIn: inNum(gaps.bottom),
             cornerRadiusIn: inNum(ctx.plan.cornerRadius),
+            safeCornerRadiusIn: inNum(ctx.plan.safeCornerRadius),
           },
         }),
       );
@@ -348,12 +398,14 @@ export function checkSafeArea(ctx: PreflightContext): PreflightFinding[] {
       out.push(
         finding({
           code: "SAFE_AREA_BARCODE",
+          // A barcode is the one thing that stays an error either way: a symbol
+          // that loses part of a quiet zone to the cut stops scanning.
           severity: "error",
           title: "Barcode is outside the safe area",
           detail:
             `The symbol including its quiet zones measures ${inches(bounds.w)} × ${inches(bounds.h)} and ` +
             `reaches past the safe area by ${describeShortfall(gaps)}` +
-            (cornerCase(ctx, bounds) ? `, crossing the ${inches(ctx.plan.cornerRadius)} corner radius` : "") +
+            (cornerCase(ctx, bounds) ? `, crossing the ${inches(ctx.plan.safeCornerRadius)} safe-area corner radius` : "") +
             `. Trimming into a quiet zone is the most common cause of a symbol that will not scan.`,
           remedy:
             `Move the symbol so the whole quiet-zone box sits inside ${inches(safe.w)} × ${inches(safe.h)} ` +
@@ -389,7 +441,7 @@ export function checkSafeArea(ctx: PreflightContext): PreflightFinding[] {
           : "Element extends past the safe area",
         detail:
           `The element reaches past the safe area by ${describeShortfall(gaps)}` +
-          (cornerCase(ctx, bounds) ? ` and crosses the ${inches(ctx.plan.cornerRadius)} corner radius` : "") +
+          (cornerCase(ctx, bounds) ? ` and crosses the ${inches(ctx.plan.safeCornerRadius)} safe-area corner radius` : "") +
           `. It stops inside the card rather than bleeding off it, so the trim tolerance of ` +
           `${inches(safe.x - ctx.plan.trim.x)} is what stands between it and the cut edge.`,
         remedy: required
@@ -412,21 +464,35 @@ export function checkSafeArea(ctx: PreflightContext): PreflightFinding[] {
 /* --------------------------------------------------------------- cavity */
 
 /**
- * Content under the clamshell cavity is not visible on shelf.
+ * Clamshell cavity awareness.
  *
- * The cavity is thermoformed into the FRONT of the clamshell and the product
- * sits in it, against the front face of the card. Anything printed there is
- * behind the part. On the back of the card the same footprint is not obstructed,
- * so the overlap is reported for information rather than graded as a defect.
+ * What is actually true on a thermoformed clamshell: the card sits between two
+ * clear PVC halves and the cavity is a pocket formed into the front half. The
+ * plastic is transparent, so the card IS seen through it — on a 409TF the
+ * cavity covers 87 % of the card, and treating all of that as hidden would
+ * condemn every real design. What the pocket does is (a) hold the part, which
+ * physically covers whatever is directly behind it, and (b) put a formed,
+ * curved plastic wall between the eye and the card.
+ *
+ * So the graded defect is narrow and specific: a BARCODE on the front under the
+ * cavity cannot be scanned, because a scanner needs a flat, unobstructed window
+ * and there is a metal part in the way. Everything else is context: one
+ * informational note per side listing the elements the part may sit over, so a
+ * designer can judge it, rather than seventeen errors that train people to
+ * ignore the panel.
+ *
+ * The back half of a clamshell is flat, so nothing on the back is reported.
  *
  * The cavity rect is used as a rectangle, not as a rounded shape: the corner
  * radii in the presets are recovered from a raster edge profile and are marked
  * approximate, so widening the test with them would be false precision.
  */
 export function checkCavityConflict(ctx: PreflightContext): PreflightFinding[] {
+  if (ctx.side !== "front") return [];
+
   const out: PreflightFinding[] = [];
   const cavity = ctx.plan.cavity;
-  const front = ctx.side === "front";
+  const covered: Array<{ name: string; pct: number }> = [];
 
   for (const op of ctx.plan.ops) {
     if (!opPaintsInk(op)) continue;
@@ -435,44 +501,79 @@ export function checkCavityConflict(ctx: PreflightContext): PreflightFinding[] {
     const overlap = rectIntersection(bounds, cavity);
     if (!overlap) continue;
 
-    const critical = op.op === "text" || op.op === "barcode";
-    // Decoration is only reported when the cavity hides all of it; a background
-    // that happens to run under the part is not a finding.
-    if (!critical && !rectContains(cavity, bounds)) continue;
-
     const areaPct = Math.round(
-      ((uptToIn(overlap.w) * uptToIn(overlap.h)) / Math.max(1e-9, uptToIn(bounds.w) * uptToIn(bounds.h))) * 100,
+      ((uptToIn(overlap.w) * uptToIn(overlap.h)) /
+        Math.max(1e-9, uptToIn(bounds.w) * uptToIn(bounds.h))) *
+        100,
     );
+
+    if (op.op === "barcode") {
+      out.push(
+        finding({
+          code: "CAVITY_CONFLICT",
+          severity: "error",
+          title: "Barcode sits under the clamshell cavity",
+          detail:
+            `${areaPct} % of the symbol falls inside the ${inches(cavity.w)} × ${inches(cavity.h)} ` +
+            `cavity footprint at (${inches(cavity.x)}, ${inches(cavity.y)}). A scanner needs a flat, ` +
+            `unobstructed window; here it would be reading through a formed plastic pocket with the ` +
+            `part inside it. Cavity geometry provenance: ` +
+            `${CARD_PRESETS[ctx.doc.presetCode].cavity.provenance}.`,
+          remedy:
+            `Move the symbol into a flange band — clear of the cavity, above ${inches(cavity.y)} or ` +
+            `below ${inches(rectBottom(cavity))} in page coordinates — or put it on the back of the card, ` +
+            `which is the usual place for it.`,
+          ...at(ctx, op.elementId, overlap),
+          measurements: {
+            overlapPct: areaPct,
+            cavityXIn: inNum(cavity.x),
+            cavityYIn: inNum(cavity.y),
+            cavityWIn: inNum(cavity.w),
+            cavityHIn: inNum(cavity.h),
+          },
+        }),
+      );
+      continue;
+    }
+
+    // Only worth mentioning when the part could actually sit over most of it.
+    if (areaPct >= 60) {
+      const el = ctx.elements.get(op.elementId);
+      covered.push({ name: el ? defaultElementName(el) : op.elementId, pct: areaPct });
+    }
+  }
+
+  if (covered.length) {
+    const named = covered
+      .slice(0, 8)
+      .map((c) => `${c.name} (${c.pct} %)`)
+      .join(", ");
     out.push(
       finding({
         code: "CAVITY_CONFLICT",
-        severity: critical ? (front ? "error" : "info") : "info",
-        title: critical
-          ? front
-            ? `${op.op === "barcode" ? "Barcode" : "Text"} sits under the clamshell cavity`
-            : `${op.op === "barcode" ? "Barcode" : "Text"} overlaps the cavity footprint on the back`
-          : "Artwork is fully covered by the cavity footprint",
+        severity: "info",
+        title: `${covered.length} element${covered.length === 1 ? "" : "s"} sit under the cavity footprint`,
         detail:
-          `${areaPct} % of this element falls inside the ${inches(cavity.w)} × ${inches(cavity.h)} cavity ` +
-          `footprint at (${inches(cavity.x)}, ${inches(cavity.y)}). ` +
-          (front
-            ? "The product sits in that pocket against the front of the card, so the covered content is not visible on shelf."
-            : "The cavity is formed on the front of the clamshell; the back of the card is not obstructed by it, so this is reported for context only.") +
-          ` Cavity geometry provenance: ${CARD_PRESETS[ctx.doc.presetCode].cavity.provenance}.`,
-        remedy: critical && front
-          ? `Move this content out of the cavity footprint — the clear bands are above ${inches(cavity.y)} and below ${inches(rectBottom(cavity))} in page coordinates — or move it to the back of the card.`
-          : `No action needed unless the pack is assembled with the card facing the other way; if it is, move this content clear of the footprint.`,
-        ...at(ctx, op.elementId, overlap),
+          `The clamshell pocket is ${inches(cavity.w)} × ${inches(cavity.h)} at ` +
+          `(${inches(cavity.x)}, ${inches(cavity.y)}) — most of the card. The PVC is clear, so this ` +
+          `artwork is seen through it, but the part itself sits in that pocket and will cover whatever ` +
+          `is directly behind it: ${named}${covered.length > 8 ? ", …" : ""}. ` +
+          `Cavity geometry provenance: ${CARD_PRESETS[ctx.doc.presetCode].cavity.provenance}.`,
+        remedy:
+          `Check a physical sample. Anything that must stay readable with the part in the pack — the ` +
+          `part number and the barcode above all — belongs in the flange bands above ` +
+          `${inches(cavity.y)} or below ${inches(rectBottom(cavity))}.`,
+        side: ctx.side,
+        rect: cavity,
         measurements: {
-          overlapPct: areaPct,
-          cavityXIn: inNum(cavity.x),
-          cavityYIn: inNum(cavity.y),
+          elementsCovered: covered.length,
           cavityWIn: inNum(cavity.w),
           cavityHIn: inNum(cavity.h),
         },
       }),
     );
   }
+
   return out;
 }
 

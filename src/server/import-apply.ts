@@ -1,4 +1,3 @@
-import "server-only";
 import { and, eq, inArray } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import {
@@ -11,7 +10,7 @@ import {
   productIdentifiers,
   products,
   warnings,
-} from "@/server/db";
+} from "@/server/db/client";
 import type { ImportPlan } from "@/lib/import/types";
 
 /**
@@ -24,6 +23,34 @@ import type { ImportPlan } from "@/lib/import/types";
  * catalogue.
  */
 
+
+/**
+ * Store an identifier in the form its own kind names.
+ *
+ * The preview's `canonical` is always the zero-padded GTIN-14, because that is
+ * what row matching compares. Writing that into the `gtin12` row would give the
+ * barcode engine a 14-digit string for a UPC-A, so each kind is stored at its
+ * own length: the source value when it already has the right number of digits,
+ * otherwise the correct slice of the canonical GTIN-14.
+ */
+const GTIN_LENGTHS: Record<string, number> = { gtin8: 8, gtin12: 12, gtin13: 13, gtin14: 14 };
+
+function identifierValue(kind: string, value: string, canonical: string): string {
+  const want = GTIN_LENGTHS[kind];
+  if (want === undefined) return (value || canonical).trim();
+  const digitsValue = value.replace(/\D/g, "");
+  if (digitsValue.length === want) return digitsValue;
+  const digitsCanonical = canonical.replace(/\D/g, "");
+  if (digitsCanonical.length >= want) {
+    const sliced = digitsCanonical.slice(digitsCanonical.length - want);
+    // Only safe when the dropped leading digits are padding zeros; a GTIN-14
+    // with a real indicator digit is not the same trade item as its GTIN-12.
+    const dropped = digitsCanonical.slice(0, digitsCanonical.length - want);
+    if (/^0*$/.test(dropped)) return sliced;
+  }
+  return digitsValue || digitsCanonical;
+}
+
 export type ApplyReport = {
   created: number;
   updated: number;
@@ -32,6 +59,8 @@ export type ApplyReport = {
   bomsWritten: number;
   bomItems: number;
   brandsCreated: string[];
+  /** Products whose part number was taken from the SKU column. */
+  partNumberFromSku: number;
   errors: Array<{ rowNumber: number; message: string }>;
 };
 
@@ -48,6 +77,7 @@ export async function applyImportPlan(
     bomsWritten: 0,
     bomItems: 0,
     brandsCreated: [],
+    partNumberFromSku: 0,
     errors: [],
   };
 
@@ -72,33 +102,61 @@ export async function applyImportPlan(
   const refToProductId = new Map<string, string>();
   const bomRefToId = new Map<string, string>();
 
+  /**
+   * Many catalogue exports — the supplied GS1 Data Hub sheet among them — have
+   * no column called "part number"; the selling number lives in the SKU column
+   * and GS1 calls it a SKU. A product with no part number would be unusable on a
+   * card, so the SKU identifier is used as the part number when the mapping
+   * supplied no separate one. This is a documented fallback, not a silent
+   * correction: the SKU identifier is still written in its own right, and the
+   * source row is retained verbatim.
+   */
+  const skuByRef = new Map<string, string>();
+  for (const op of plan.operations) {
+    if (op.op === "upsertIdentifier" && op.kind === "sku" && op.value) {
+      if (!skuByRef.has(op.ref)) skuByRef.set(op.ref, op.canonical || op.value);
+    }
+  }
+  let partNumberFromSku = 0;
+
   for (const op of plan.operations) {
     try {
       switch (op.op) {
         case "upsertProduct": {
+          // `values` is keyed by TARGET FIELD KEY (product.partNumber, …), which
+          // is the vocabulary the mapping UI and the preview both speak. Reading
+          // it through a helper keeps that contract in one place.
+          const v = (key: string) => op.values[key] ?? "";
           const values = {
             orgId,
             brandId: op.brandName ? (brandIds.get(op.brandName) ?? null) : null,
-            partNumber: op.values.partNumber ?? "",
-            productName: op.values.productName ?? "",
-            description: op.values.description ?? "",
-            descriptionShort: op.values.descriptionShort ?? "",
-            labelDescription: op.values.labelDescription ?? "",
-            subtitle: op.values.subtitle ?? "",
-            countryOfOrigin: op.values.countryOfOrigin ?? "",
-            status: op.values.status || "Draft",
-            packagingLevel: op.values.packagingLevel || "Each",
-            netContentCount: op.values.netContentCount ?? "",
-            netContentUom: op.values.netContentUom ?? "",
-            isPurchasable: op.values.isPurchasable !== "N",
-            isVariable: op.values.isVariable === "Y",
+            partNumber: (() => {
+              const explicit = v("product.partNumber");
+              if (explicit) return explicit;
+              const sku = skuByRef.get(op.ref) ?? "";
+              if (sku) partNumberFromSku += 1;
+              return sku;
+            })(),
+            productName: v("product.productName"),
+            description: v("product.description"),
+            descriptionShort: v("product.descriptionShort"),
+            labelDescription: v("product.labelDescription"),
+            subtitle: v("product.subtitle"),
+            countryOfOrigin: v("product.countryOfOrigin"),
+            status: v("product.status") || "Draft",
+            packagingLevel: v("product.packagingLevel") || "Each",
+            netContentCount: v("product.netContentCount"),
+            netContentUom: v("product.netContentUom"),
+            isPurchasable: v("product.isPurchasable") !== "N",
+            isVariable: v("product.isVariable") === "Y",
             recordType: op.recordType,
-            targetMarkets: op.values.targetMarkets ?? "",
-            gpcBrick: op.values.gpcBrick ?? "",
+            targetMarkets: v("product.targetMarkets"),
+            gpcBrick: v("product.gpcBrick"),
+            defaultPresetCode: v("product.defaultPresetCode") || null,
             sourceImportId: importId,
             sourceRow: op.sourceRow,
             custom: op.custom,
-            lastModifiedSource: op.values.lastModifiedSource ?? "",
+            lastModifiedSource: v("product.lastModifiedSource"),
             updatedAt: new Date(),
           };
 
@@ -153,7 +211,7 @@ export async function applyImportPlan(
             orgId,
             productId,
             kind: op.kind,
-            value: op.canonical || op.value,
+            value: identifierValue(op.kind, op.value, op.canonical),
             isPrimary: op.isPrimary,
             valid: op.valid,
             validationNote: op.validationNote,
@@ -270,5 +328,6 @@ export async function applyImportPlan(
     }
   }
 
+  report.partNumberFromSku = partNumberFromSku;
   return report;
 }

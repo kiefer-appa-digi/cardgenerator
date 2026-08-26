@@ -26,6 +26,10 @@ import {
   encodeUpcA,
   hasValidCheckDigit,
   magnificationForWidth,
+  narrowGtin,
+  normaliseGtin14,
+  padGtin,
+  sanitiseDigits,
   moduleWidthFor,
   normaliseEan13,
   normaliseUpcA,
@@ -538,9 +542,12 @@ describe("magnification", () => {
     );
     expect(r.width).toBeLessThanOrEqual(target);
     expect(r.width).toBe(fit.width);
-    // One more basis point would overflow the target.
+    // One more basis point overflows the target. The old assertion compared
+    // against `target - 113`, which a width that still FITS also satisfies.
     const bigger = 113 * Math.round((NOMINAL_X_UPT * (fit.magnificationBps + 1)) / 10_000);
-    expect(bigger).toBeGreaterThan(target - 113);
+    expect(bigger).toBeGreaterThan(target);
+    expect(fit.width).toBe(89_997_946);
+    expect(fit.magnificationBps).toBe(8_509);
   });
 
   it("reports when the target width is unreachable inside the standard", () => {
@@ -682,13 +689,14 @@ describe("GS1-128", () => {
     expect(mixed.symbol.values[0]).toBe(START_B);
     expect(mixed.symbol.values).toHaveLength(7); // start + six characters
 
-    // An odd-length run mid-string: one digit in B, then the pairs in C.
+    // An odd-length run mid-string: the leading digit stays in B, then CODE C
+    // and three pairs. Asserted as the exact sequence — "<= 8 characters" was
+    // satisfied by encodings that are not the optimal one.
     const odd = encodeCode128Text("A1234567");
     expect(odd.ok).toBe(true);
     if (!odd.ok) return;
-    expect(odd.symbol.values[0]).toBe(START_B);
-    // start, 'A', CODE C, three pairs, plus the leftover digit handled in B.
-    expect(odd.symbol.values.length).toBeLessThanOrEqual(8);
+    // START_B, 'A'(33), '1'(17), CODE C(99), 23, 45, 67.
+    expect([...odd.symbol.values]).toEqual([START_B, 33, 17, 99, 23, 45, 67]);
   });
 
   it("separates variable-length elements with FNC1 but not fixed ones", () => {
@@ -817,5 +825,256 @@ describe("QR and GS1 Digital Link", () => {
 
   it("rejects an empty QR value", () => {
     expect(expectErr(renderBarcode(req({ symbology: "qr", value: "  " }))).code).toBe("EMPTY");
+  });
+});
+
+
+/* --------------------------------------------- adversarial review regressions */
+
+describe("regressions found by adversarial review", () => {
+  it("reports a wrong check digit on a 13/14-digit GTIN as BAD_CHECK_DIGIT, not BAD_LENGTH", () => {
+    // The widened UPC-A/EAN-13 readings used to collapse every failure of the
+    // 13/14-digit attempt into "expected 11, 12, 13 or 14 digits", telling the
+    // operator the length was wrong when the length was fine.
+    for (const value of ["0810797030125", "00810797030125"]) {
+      const norm = normaliseUpcA(value);
+      expect(norm.ok).toBe(false);
+      if (norm.ok) return;
+      expect(norm.error.code).toBe("BAD_CHECK_DIGIT");
+      expect(norm.error.value).toBe(value);
+      expect(norm.error.message).toContain("4 is correct");
+    }
+    const ean = normaliseEan13("00810797030125");
+    expect(ean.ok).toBe(false);
+    if (ean.ok) return;
+    expect(ean.error.code).toBe("BAD_CHECK_DIGIT");
+
+    // A genuine length failure still reads as one.
+    const short = normaliseUpcA("12345");
+    expect(short.ok).toBe(false);
+    if (short.ok) return;
+    expect(short.error.code).toBe("BAD_LENGTH");
+  });
+
+  it("never turns a signed number into a valid-looking GTIN", () => {
+    // "-36000291452" is 12 characters. Stripping the "-" leaves an 11-digit
+    // body, which the UPC-A reading would then hand a computed check digit —
+    // printing 360002914522, a real-looking barcode for a value nobody typed.
+    for (const value of ["-36000291452", "+36000291452", ".036000291452", "036000291452-"]) {
+      const norm = normaliseUpcA(value);
+      expect(norm.ok).toBe(false);
+      if (norm.ok) return;
+      expect(norm.error.code).toBe("BAD_CHARSET");
+    }
+    // Separators BETWEEN digits are still the ordinary printed form, and their
+    // removal is now stated in a note rather than passing unremarked.
+    const spaced = normaliseUpcA("0 36000 29145 2");
+    expect(spaced.ok && spaced.value.gtin).toBe("036000291452");
+    expect(spaced.ok && spaced.value.notes.join(" ")).toContain("separators removed");
+    expect(sanitiseDigits("036-000 291.452")).toBe("036000291452");
+    expect(sanitiseDigits("-36000291452")).toBe("-36000291452");
+    // A trailing ".0" is a spreadsheet artefact, not a check digit.
+    const decimal = normaliseUpcA("036000291452.0");
+    expect(decimal.ok).toBe(false);
+  });
+
+  it("accepts only GS1 GTIN lengths in AI (01)", () => {
+    // 9, 10 and 11 digits are not GTIN lengths. Padding them to 14 invents an
+    // identifier: (01)1234567895 used to encode as (01)00001234567895.
+    for (const value of ["1234567895", "12345678905", "123456789"]) {
+      const r = encodeGs1_128(`(01)${value}`);
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(["BAD_LENGTH", "BAD_CHECK_DIGIT"]).toContain(r.error.code);
+    }
+    const ten = encodeGs1_128("(01)1234567895");
+    expect(ten.ok).toBe(false);
+    if (ten.ok) return;
+    expect(ten.error.code).toBe("BAD_LENGTH");
+    expect(ten.error.message).toContain("8, 12, 13 or 14");
+
+    // The four real lengths all still work and all pad to the same GTIN-14.
+    for (const value of ["810797030124", "0810797030124", "00810797030124"]) {
+      const r = encodeGs1_128(`(01)${value}`);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.symbol.humanReadable).toBe("(01)00810797030124");
+    }
+    const eight = encodeGs1_128("(01)96385074");
+    expect(eight.ok && eight.symbol.humanReadable).toBe("(01)00000096385074");
+  });
+
+  it("refuses AI data outside GS1 encodable character set 82", () => {
+    // The set is not "printable ASCII": it excludes space, #, $, @, [, \, ],
+    // ^, `, {, |, } and ~. A GS1-128 carrying one of those scans but fails
+    // verification, so it is reported instead of encoded.
+    for (const ch of [" ", "#", "$", "@", "[", "]", "^", "`", "{", "|", "}", "~", "\\"]) {
+      const r = encodeGs1_128(`(10)A${ch}B`);
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.error.code).toBe("BAD_CHARSET");
+      expect(r.error.message).toContain("82");
+    }
+    // Everything the set does allow still encodes.
+    for (const value of ["LOT-42", "LOT.42/A", "L!O\"T%42", "a_z:;<=>?", "A*B+C,D'E"]) {
+      expect(encodeGs1_128(`(10)${value}`).ok).toBe(true);
+    }
+  });
+
+  it("refuses to build a symbol from an unvalidated value instead of emitting one made of undefined", () => {
+    // encodeUpcA("12345") used to return a 109-module "pattern" containing the
+    // literal text "undefined" and report it as a valid symbol.
+    expect(() => encodeUpcA("12345")).toThrow(/12 validated digits/);
+    expect(() => encodeUpcA("abcdefghijkl")).toThrow(/12 validated digits/);
+    expect(() => encodeUpcA("0360002914521")).toThrow(/12 validated digits/);
+    expect(() => encodeEan13("")).toThrow(/13 validated digits/);
+    expect(() => encodeEan13("036000291452")).toThrow(/13 validated digits/);
+    // The validated forms are untouched.
+    expect(encodeUpcA("036000291452").pattern).toHaveLength(EAN_UPC_MODULES);
+    expect(encodeEan13("5901234123457").pattern).toHaveLength(EAN_UPC_MODULES);
+  });
+
+  it("keeps every geometric quantity finite when the font size is not", () => {
+    // A NaN font size used to come back as render.height === NaN and a NaN
+    // baseline on every run, straight through to the PDF writer.
+    for (const fontSize of [Number.NaN, 0, -1, Number.POSITIVE_INFINITY]) {
+      const r = expectOk(
+        renderBarcode(req({ symbology: "upca", value: "036000291452", humanReadableFontSize: fontSize })),
+      );
+      expect(Number.isInteger(r.height)).toBe(true);
+      expect(Number.isInteger(r.width)).toBe(true);
+      for (const t of r.text) {
+        expect(Number.isInteger(t.baseline)).toBe(true);
+        expect(Number.isInteger(t.fontSize)).toBe(true);
+        expect(Number.isInteger(t.width)).toBe(true);
+      }
+      expect(r.notes.some((n) => n.includes("font size"))).toBe(true);
+    }
+    // Silent when no human-readable text is drawn at all.
+    const hidden = expectOk(
+      renderBarcode(
+        req({
+          symbology: "upca",
+          value: "036000291452",
+          humanReadableFontSize: Number.NaN,
+          showHumanReadable: false,
+          showLightMarginIndicator: false,
+        }),
+      ),
+    );
+    expect(hidden.notes.some((n) => n.includes("font size"))).toBe(false);
+    expect(Number.isInteger(hidden.height)).toBe(true);
+  });
+
+  it("reports a Digital Link domain that cannot resolve rather than encoding it", () => {
+    for (const domain of ["exa mple.com", "javascript:alert(1)", "ftp://x.com", "http://"]) {
+      const e = expectErr(
+        renderBarcode(
+          req({ symbology: "gs1-digital-link", value: "810797030124", digitalLinkDomain: domain }),
+        ),
+      );
+      expect(e.code).toBe("BAD_CHARSET");
+    }
+    // A supplied resolver URI is held to the same standard.
+    expect(
+      expectErr(renderBarcode(req({ symbology: "gs1-digital-link", value: "https://exa mple.com/01/x" }))).code,
+    ).toBe("BAD_CHARSET");
+    // Usable domains, bare or with a scheme or a trailing slash, still work.
+    for (const domain of ["https://example.com", "id.example.com", "https://example.com/", "https://example.com/gs1"]) {
+      const r = expectOk(
+        renderBarcode(
+          req({ symbology: "gs1-digital-link", value: "810797030124", digitalLinkDomain: domain }),
+        ),
+      );
+      expect(r.encodedValue.endsWith("/01/00810797030124")).toBe(true);
+    }
+  });
+
+  it("covers the GTIN helpers the first suite left untested", () => {
+    expect(padGtin("96385074", 14)).toBe("00000096385074");
+    expect(padGtin("00810797030124", 14)).toBe("00810797030124");
+    expect(narrowGtin("00810797030124", 12)).toBe("810797030124");
+    expect(narrowGtin("10810797030121", 12)).toBeNull();
+    expect(narrowGtin("810797030124", 14)).toBeNull();
+    // Zero padding never disturbs the check digit, whatever the parity of the
+    // number of zeros added, because a zero weighs nothing at either weight.
+    for (const gtin of ["96385074", "810797030124", "0810797030124"]) {
+      expect(hasValidCheckDigit(gtin)).toBe(true);
+      expect(hasValidCheckDigit(padGtin(gtin, 14))).toBe(true);
+    }
+    const eight = normaliseGtin14("96385074");
+    expect(eight.ok && eight.value.gtin).toBe("00000096385074");
+    expect(eight.ok && eight.value.notes.join(" ")).toContain("GTIN-8 zero-padded");
+    // A GTIN-8 is not a UPC-A and is not quietly widened into one.
+    expect(expectErr(renderBarcode(req({ symbology: "upca", value: "96385074" }))).code).toBe("BAD_LENGTH");
+    // But it is a perfectly good Digital Link.
+    expect(
+      expectOk(renderBarcode(req({ symbology: "gs1-digital-link", value: "96385074" }))).encodedValue,
+    ).toBe("https://id.gs1.org/01/00000096385074");
+  });
+
+  it("reaches subset A for control characters, with SHIFT only when it is cheaper", () => {
+    // Nothing in the first suite exercised subset A or the SHIFT character.
+    // Upper case plus a control character is cheapest wholly inside A: START_A,
+    // 'A'(33), 'B'(34), TAB(9 + 64 = 73), 'C'(35), 'D'(36) — no SHIFT at all.
+    const upperWithControl = encodeCode128Text(`AB${String.fromCharCode(9)}CD`);
+    expect(upperWithControl.ok).toBe(true);
+    if (!upperWithControl.ok) return;
+    expect([...upperWithControl.symbol.values]).toEqual([START_A, 33, 34, 73, 35, 36]);
+
+    // Lower case cannot live in A, so the one control character is borrowed
+    // from A with SHIFT(98) rather than paying for two subset switches.
+    const lowerWithControl = encodeCode128Text(`ab${String.fromCharCode(9)}cd`);
+    expect(lowerWithControl.ok).toBe(true);
+    if (!lowerWithControl.ok) return;
+    expect([...lowerWithControl.symbol.values]).toEqual([START_B, 65, 66, 98, 73, 67, 68]);
+    expect(lowerWithControl.symbol.pattern).toHaveLength(lowerWithControl.symbol.modules);
+
+    // Non-ASCII is refused, not truncated to a low byte.
+    const emoji = encodeCode128Text("A\u{1F600}B");
+    expect(emoji.ok).toBe(false);
+    if (emoji.ok) return;
+    expect(emoji.error.code).toBe("BAD_CHARSET");
+    expect(encodeCode128Text("").ok).toBe(false);
+  });
+
+  it("survives degenerate magnifications, bar heights and fit widths", () => {
+    for (const magnificationBps of [Number.NaN, 0, -5, Number.POSITIVE_INFINITY]) {
+      const r = expectOk(renderBarcode(req({ symbology: "upca", value: "036000291452", magnificationBps })));
+      expect(r.moduleWidth).toBe(moduleWidthFor("upca", 10_000));
+      expect(r.notes.some((n) => n.includes("not usable"))).toBe(true);
+    }
+    for (const barHeight of [Number.NaN, 0, -1_000]) {
+      const r = expectOk(renderBarcode(req({ symbology: "upca", value: "036000291452", barHeight })));
+      expect(r.bars.every((b) => Number.isInteger(b.h) && b.h > 0)).toBe(true);
+      expect(r.notes.some((n) => n.includes("bar height"))).toBe(true);
+    }
+    // A fit width no symbol can meet clamps to the floor and says so; it never
+    // returns a zero-width or fractional symbol.
+    const tiny = expectOk(renderBarcode(req({ symbology: "upca", value: "036000291452", fitWidth: 1 })));
+    expect(tiny.moduleWidth).toBe(moduleWidthFor("upca", MIN_MAGNIFICATION_BPS));
+    expect(tiny.notes.some((n) => n.includes("target width"))).toBe(true);
+    // Zero and negative fit widths fall back to the requested magnification.
+    for (const fitWidth of [0, -100, Number.NaN]) {
+      const r = expectOk(renderBarcode(req({ symbology: "upca", value: "036000291452", fitWidth })));
+      expect(r.moduleWidth).toBe(moduleWidthFor("upca", 10_000));
+    }
+    // Every symbology fits a target without exceeding it.
+    for (const symbology of ["upca", "ean13", "gs1-128", "qr"] as const) {
+      const fit = magnificationForWidth(symbology, 113, 120_000_000);
+      expect(Number.isInteger(fit.moduleWidth)).toBe(true);
+      expect(fit.clamped || fit.width <= 120_000_000).toBe(true);
+    }
+  });
+
+  it("rejects QR data it cannot hold instead of truncating it", () => {
+    const e = expectErr(renderBarcode(req({ symbology: "qr", value: "A".repeat(10_000) })));
+    expect(e.code).toBe("TOO_LONG");
+    // Just inside capacity still renders, one square rect per dark module.
+    const r = expectOk(
+      renderBarcode(req({ symbology: "qr", value: "A".repeat(500), showHumanReadable: false })),
+    );
+    expect(r.width).toBe(r.height);
+    expect(r.bars.every((b) => b.w === r.moduleWidth && b.h === r.moduleWidth)).toBe(true);
   });
 });

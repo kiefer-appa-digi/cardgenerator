@@ -540,7 +540,8 @@ export const exportArtifacts = pgTable(
     /** Result of the post-export PDF inspection (spec §22). */
     validation: jsonb("validation").notNull().default(sql`'{}'::jsonb`),
     preflight: jsonb("preflight"),
-    status: varchar("status", { length: 16 }).notNull().default("ok"),
+    /** ok | invalid — "invalid" means the file failed its own post-export check. */
+    status: varchar("status", { length: 24 }).notNull().default("ok"),
     error: text("error").notNull().default(""),
     createdAt: ts("created_at"),
   },

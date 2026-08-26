@@ -194,11 +194,21 @@ export type DigitalLinkOptions = {
   expiry?: string;
 };
 
-/** Normalise a configured domain into an origin with no trailing slash. */
+/**
+ * Normalise a configured domain into an origin with no trailing slash.
+ *
+ * The scheme is promoted BEFORE trailing slashes are trimmed. Doing it the
+ * other way round ate the scheme's own "//": "http://" became "http:", which
+ * then failed the scheme test and was promoted again into "https://http:" — a
+ * URI that parses, with a host of "http", and resolves nowhere.
+ */
 export function normaliseDigitalLinkDomain(domain: string): string {
-  const trimmed = domain.trim().replace(/\/+$/, "");
+  const trimmed = domain.trim();
   if (trimmed.length === 0) return DEFAULT_DIGITAL_LINK_DOMAIN;
-  return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  const withScheme = /^https?:\/\//i.test(trimmed)
+    ? trimmed
+    : `https://${trimmed.replace(/^\/+/, "")}`;
+  return withScheme.replace(/\/+$/, "");
 }
 
 /**

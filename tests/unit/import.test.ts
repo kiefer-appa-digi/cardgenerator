@@ -861,3 +861,356 @@ describe("alternates and defaults", () => {
     expect(plan.brands).toEqual(["TowPro"]);
   });
 });
+
+/** Characters Postgres jsonb cannot represent, so a key must not carry one. */
+const CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F]/;
+
+/* ==================================================================== */
+/*  Regressions — each of these reproduces a defect found in review     */
+/* ==================================================================== */
+
+describe("regression: re-asserting an unchanged row must not insert a duplicate", () => {
+  it("plans an unchanged row as an update, because it already has a record", async () => {
+    const parsed = await parseWorkbook(
+      await makeWorkbook([
+        {
+          name: "Items",
+          rows: [
+            ["Part Number", "UPC", "Brand"],
+            ["11-500", "810797030001", "AxleTek"],
+          ],
+        },
+      ]),
+    );
+    const { preview: first } = previewOf(parsed, "Items");
+    const existing: ExistingProduct[] = first.rows.map((r, i) => ({
+      id: `existing-${i}`,
+      brandName: r.fields["brand.name"] ?? "",
+      partNumber: r.fields["product.partNumber"] ?? "",
+      gtins: r.identifiers.filter((id) => id.kind.startsWith("gtin")).map((id) => id.value),
+      fields: { ...r.fields },
+    }));
+
+    const again = previewOf(parsed, "Items", existing).preview;
+    expect(again.summary.unchanged).toBe(1);
+
+    const plan = planImport(again, { importId: "imp", includeUnchanged: true });
+    const op = operationsByKind(plan).upsertProduct[0];
+    // The applier inserts a brand new row for anything that is not mode "update".
+    expect(op.existingId).toBe("existing-0");
+    expect(op.mode).toBe("update");
+  });
+
+  it("still plans a genuinely new row as a create", async () => {
+    const parsed = await parseWorkbook(
+      await makeWorkbook([
+        { name: "Items", rows: [["Part Number", "UPC"], ["11-500", "810797030001"]] },
+      ]),
+    );
+    const { preview } = previewOf(parsed, "Items");
+    const op = operationsByKind(planImport(preview, { importId: "imp" })).upsertProduct[0];
+    expect(op.mode).toBe("create");
+    expect(op.existingId).toBeNull();
+  });
+});
+
+describe("regression: a header that is also an Object.prototype key", () => {
+  it("keeps a __proto__ column in the source row and maps it without crashing", async () => {
+    const parsed = await parseWorkbook(
+      await makeWorkbook([
+        {
+          name: "Odd",
+          rows: [
+            ["Part Number", "__proto__", "constructor"],
+            ["11-500", "kept verbatim", "also kept"],
+          ],
+        },
+      ]),
+    );
+    const read = readParsedSheetRows(parsed, { sheetName: "Odd" });
+    // Assigning "__proto__" on a normal object is swallowed; the column used to
+    // disappear from the provenance record without a word.
+    expect(Object.keys(read.rows[0].cells)).toEqual([
+      "Part Number",
+      "__proto__",
+      "constructor",
+    ]);
+    expect(read.rows[0].cells["__proto__"]).toBe("kept verbatim");
+
+    const base = suggestMapping(read.headers, { sheetName: "Odd" });
+    const mapping = validateMapping({
+      ...base,
+      columns: base.columns.map((c) =>
+        c.header === "__proto__"
+          ? { ...c, field: "product.description", source: "manual" as const, confidence: 100 }
+          : c,
+      ),
+    });
+    const preview = buildPreview({ orgId: "org1", mapping, rows: read.rows });
+    expect(preview.rows[0].fields["product.description"]).toBe("kept verbatim");
+
+    const op = operationsByKind(planImport(preview, { importId: "imp" })).upsertProduct[0];
+    expect(Object.getOwnPropertyDescriptor(op.sourceRow, "__proto__")?.value).toBe(
+      "kept verbatim",
+    );
+    // and nothing leaked onto the shared prototype
+    expect(Object.getPrototypeOf(op.sourceRow)).toBe(Object.prototype);
+  });
+});
+
+describe("regression: treatBlankAsClear", () => {
+  it("sees an erased cell only when the option is on", async () => {
+    const parsed = await parseWorkbook(
+      await makeWorkbook([
+        {
+          name: "Items",
+          rows: [
+            ["Part Number", "Description", "UPC", "Brand"],
+            ["11-500", "", "810797030001", "AxleTek"],
+          ],
+        },
+      ]),
+    );
+    const read = readParsedSheetRows(parsed, { sheetName: "Items" });
+    const mapping = suggestMapping(read.headers, { sheetName: "Items" });
+    const existing: ExistingProduct[] = [
+      {
+        id: "e1",
+        brandName: "AxleTek",
+        partNumber: "11-500",
+        gtins: ["00810797030001"],
+        fields: {
+          "product.partNumber": "11-500",
+          "product.description": "OLD DESCRIPTION",
+          "brand.name": "AxleTek",
+          "identifier.gtin12": "810797030001",
+        },
+      },
+    ];
+
+    const off = buildPreview({ orgId: "org1", mapping, rows: read.rows, existing });
+    expect(off.rows[0].classification).toBe("unchanged");
+    expect(off.rows[0].changedFields).toEqual([]);
+
+    const on = buildPreview({
+      orgId: "org1",
+      mapping,
+      rows: read.rows,
+      existing,
+      options: { treatBlankAsClear: true },
+    });
+    expect(on.rows[0].classification).toBe("update");
+    expect(on.rows[0].changedFields).toEqual(["product.description"]);
+  });
+});
+
+describe("regression: which sheet is read by default", () => {
+  it("reads the sheet the inspection offers, not whichever sheet is first", async () => {
+    const parsed = await parseWorkbook(
+      await makeWorkbook([
+        { name: "Cover", rows: [["Confidential - do not distribute"]] },
+        {
+          name: "Items",
+          rows: [
+            ["Part Number", "UPC", "Brand"],
+            ["11-500", "810797030001", "AxleTek"],
+          ],
+        },
+      ]),
+    );
+    expect(inspectParsedWorkbook(parsed).primarySheetName).toBe("Items");
+
+    const read = readParsedSheetRows(parsed);
+    expect(read.sheetName).toBe("Items");
+    expect(read.rows).toHaveLength(1);
+    // An explicitly named sheet is still exactly the sheet you asked for.
+    expect(readParsedSheetRows(parsed, { sheetName: "Cover" }).sheetName).toBe("Cover");
+  });
+});
+
+describe("regression: a header row buried under a long notice block", () => {
+  it("does not accept a one-cell notice line as a confident header row", async () => {
+    const rows: (string | number | null)[][] = [];
+    for (let i = 0; i < 30; i += 1) rows.push([`Notice line ${i}`]);
+    rows.push(["Part Number", "Description", "UPC"]);
+    rows.push(["11-500", "Bearing Kit", "810797030001"]);
+    rows.push(["11-501", "Seal Kit", "036000291452"]);
+
+    const parsed = await parseWorkbook(await makeWorkbook([{ name: "Notice", rows }]));
+    const sheet = inspectParsedWorkbook(parsed).sheets[0];
+    expect(sheet.headerRowNumber).toBe(31);
+    expect(sheet.headers).toEqual(["Part Number", "Description", "UPC"]);
+    expect(sheet.dataRowCount).toBe(2);
+    expect(sheet.notes.map((n) => n.code)).toContain(
+      SHEET_NOTE_CODES.BANNER_ROWS_ABOVE_HEADER,
+    );
+
+    const read = readParsedSheetRows(parsed, { sheetName: "Notice" });
+    expect(read.rows.map((r) => r.rowNumber)).toEqual([32, 33]);
+  });
+});
+
+describe("regression: a mapping that names a field which does not exist", () => {
+  it("reports it and keeps the invented key out of the plan", async () => {
+    const parsed = await parseWorkbook(
+      await makeWorkbook([
+        { name: "Items", rows: [["Part Number", "UPC"], ["11-500", "810797030001"]] },
+      ]),
+    );
+    const read = readParsedSheetRows(parsed, { sheetName: "Items" });
+    const base = suggestMapping(read.headers, { sheetName: "Items" });
+    const mapping = validateMapping({
+      ...base,
+      columns: base.columns.map((c) =>
+        c.header === "Part Number" ? { ...c, field: "product.doesNotExist" } : c,
+      ),
+    });
+
+    const preview = buildPreview({ orgId: "org1", mapping, rows: read.rows });
+    expect(findingCodes(preview)).toContain(IMPORT_FINDING_CODES.MAPPING_UNKNOWN_FIELD);
+    expect(
+      preview.findings.find((f) => f.code === IMPORT_FINDING_CODES.MAPPING_UNKNOWN_FIELD)
+        ?.severity,
+    ).toBe("error");
+    expect(preview.committable).toBe(false);
+    expect(preview.rows[0].fields["product.doesNotExist"]).toBeUndefined();
+
+    const plan = planImport(preview, { importId: "imp" });
+    expect(plan.blocked).toBe(true);
+    for (const op of operationsByKind(plan).upsertProduct) {
+      expect(Object.keys(op.values)).not.toContain("product.doesNotExist");
+    }
+  });
+});
+
+describe("regression: keys that have to survive being stored", () => {
+  it("keys a brand + part number match with no unrepresentable characters", async () => {
+    const parsed = await parseWorkbook(
+      await makeWorkbook([
+        { name: "Items", rows: [["Part Number", "Brand"], ["11-500", "AxleTek"]] },
+      ]),
+    );
+    const { preview } = previewOf(parsed, "Items");
+    const key = preview.rows[0].match.key;
+    expect(preview.rows[0].match.kind).toBe("brandSku");
+    // Postgres jsonb cannot hold these, so a key carrying one is silently
+    // rewritten on the way to storage.
+    expect(key).not.toMatch(CONTROL_CHARS);
+    expect(JSON.parse(JSON.stringify(preview)).rows[0].match.key).toBe(key);
+  });
+
+  it("reports a repeated part number with the spelling the sheet used", async () => {
+    const parsed = await parseWorkbook(
+      await makeWorkbook([
+        {
+          name: "Items",
+          rows: [
+            ["Part Number", "UPC", "Brand"],
+            ["11-500", "810797030001", "AxleTek"],
+            ["11-500", "036000291452", "AxleTek"],
+          ],
+        },
+      ]),
+    );
+    const { preview } = previewOf(parsed, "Items");
+    expect(preview.duplicatePartNumbersInBrand).toEqual([
+      { value: "AxleTek / 11-500", rowNumbers: [2, 3] },
+    ]);
+  });
+});
+
+describe("regression: BOM line numbers", () => {
+  it("keeps a line number the sheet supplied and reports one it cannot read", async () => {
+    const parsed = await parseWorkbook(
+      await makeWorkbook([
+        {
+          name: "BOM",
+          rows: [
+            ["Parent Part Number", "Component Part Number", "Line No", "Qty"],
+            ["11-500", "A", "0", "1"],
+            ["11-500", "B", "5", "1"],
+            ["11-500", "C", "", "1"],
+            ["11-500", "D", "seven", "1"],
+          ],
+        },
+      ]),
+    );
+    const { preview } = previewOf(parsed, "BOM");
+    // 0 is a line number, not "unset": it used to be silently renumbered to 1.
+    expect(preview.rows.map((r) => r.bom?.position)).toEqual([0, 5, 6, 7]);
+    expect(preview.rows[3].findings.map((f) => f.code)).toContain(
+      IMPORT_FINDING_CODES.BOM_POSITION_INVALID,
+    );
+    expect(preview.rows[0].findings.map((f) => f.code)).not.toContain(
+      IMPORT_FINDING_CODES.BOM_POSITION_INVALID,
+    );
+  });
+});
+
+describe("regression: mapping defaults", () => {
+  it("puts a default for a list field in the list, not in the product record", async () => {
+    const parsed = await parseWorkbook(
+      await makeWorkbook([
+        { name: "Items", rows: [["Part Number", "UPC"], ["11-500", "810797030001"]] },
+      ]),
+    );
+    const read = readParsedSheetRows(parsed, { sheetName: "Items" });
+    const mapping = suggestMapping(read.headers, {
+      sheetName: "Items",
+      defaults: { "product.fitment": "Dexter 3.5K, Lippert 3.5K", "brand.name": "TowPro" },
+    });
+    const preview = buildPreview({ orgId: "org1", mapping, rows: read.rows });
+
+    expect(preview.rows[0].fitments).toEqual(["Dexter 3.5K", "Lippert 3.5K"]);
+    expect(preview.rows[0].fields["product.fitment"]).toBeUndefined();
+    expect(preview.rows[0].fields["brand.name"]).toBe("TowPro");
+
+    const op = operationsByKind(planImport(preview, { importId: "imp" })).upsertProduct[0];
+    expect(op.fitments).toEqual(["Dexter 3.5K", "Lippert 3.5K"]);
+    expect(Object.keys(op.values)).not.toContain("product.fitment");
+  });
+});
+
+describe("regression: a column that lost its best match", () => {
+  it("says so, and names the column that took the field", async () => {
+    const parsed = await parseWorkbook(
+      await makeWorkbook([
+        {
+          name: "Items",
+          rows: [
+            ["Brand Name", "Brand Name 2", "Part Number"],
+            ["AxleTek", "Achse GmbH", "11-500"],
+          ],
+        },
+      ]),
+    );
+    const { preview, mapping } = previewOf(parsed, "Items");
+    const demoted = mapping.columns[1];
+    expect(demoted.supersededBy).toBe(0);
+    expect(demoted.field).not.toBe("brand.name");
+
+    const note = preview.findings.find(
+      (f) => f.code === IMPORT_FINDING_CODES.UNMAPPED_COLUMN_HAS_DATA,
+    );
+    expect(note).toBeDefined();
+    expect(note?.message).toContain("Brand Name 2");
+    // The winner is named, not printed as a bare index.
+    expect(note?.message).toContain('"Brand Name"');
+    expect(note?.message).not.toContain("column 0");
+  });
+});
+
+describe("regression: read ceilings", () => {
+  it("ignores a ceiling that is not a usable count instead of reading nothing", async () => {
+    const bytes = await makeWorkbook([
+      { name: "Items", rows: [["Part Number", "UPC"], ["11-500", "810797030001"]] },
+    ]);
+    const nan = await parseWorkbook(bytes, { maxRows: Number.NaN });
+    expect(nan.sheets[0].grid).toHaveLength(2);
+    expect(nan.sheets[0].truncated).toBe(false);
+
+    const capped = await parseWorkbook(bytes, { maxRows: 1 });
+    expect(capped.sheets[0].grid).toHaveLength(1);
+    expect(capped.sheets[0].truncated).toBe(true);
+  });
+});

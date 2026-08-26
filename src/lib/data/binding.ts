@@ -182,6 +182,7 @@ export function resolveBinding(binding: Binding, ctx: ProductContext): BindingRe
       detail: `"${path}" is not a known product field.`,
     });
   }
+
   let status: BindingStatus = "ok";
   let value = "";
   let listCount = 0;

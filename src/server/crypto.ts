@@ -320,6 +320,19 @@ export function redactString(input: string, options: RedactOptions = {}): string
   return out;
 }
 
+/**
+ * Write one sanitised entry.
+ *
+ * Plain assignment (`out[key] = ...`) invokes the `__proto__` setter when a
+ * payload carries that key, which replaces the prototype of the object being
+ * built with attacker-supplied data and drops the branch from the redacted
+ * copy entirely. A third-party GS1 response is untrusted input, so every key
+ * from one is defined as an ordinary own data property instead.
+ */
+function defineEntry(out: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(out, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
 function isPlainish(value: object): boolean {
   const proto: unknown = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;
@@ -388,7 +401,7 @@ function redactInner(
       const out: Record<string, unknown> = {};
       for (const [k, v] of obj) {
         const key = String(k);
-        out[key] = isSensitiveKey(key) ? REDACTED : redactInner(v, options, depth - 1, seen);
+        defineEntry(out, key, isSensitiveKey(key) ? REDACTED : redactInner(v, options, depth - 1, seen));
       }
       return out;
     }
@@ -396,13 +409,13 @@ function redactInner(
       // A class instance: copy its own enumerable data only, never its methods.
       const out: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(obj)) {
-        out[k] = isSensitiveKey(k) ? REDACTED : redactInner(v, options, depth - 1, seen);
+        defineEntry(out, k, isSensitiveKey(k) ? REDACTED : redactInner(v, options, depth - 1, seen));
       }
       return out;
     }
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
-      out[k] = isSensitiveKey(k) ? REDACTED : redactInner(v, options, depth - 1, seen);
+      defineEntry(out, k, isSensitiveKey(k) ? REDACTED : redactInner(v, options, depth - 1, seen));
     }
     return out;
   } finally {

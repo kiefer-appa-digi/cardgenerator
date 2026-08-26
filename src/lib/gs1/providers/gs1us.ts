@@ -722,12 +722,12 @@ export function createGs1UsAdapter(config: Gs1ConnectionConfig, deps: Gs1UsDeps)
    * usable answer: applied to the local product it would attach another item's
    * brand, description and licence to it. Reported rather than absorbed.
    */
-  function gtinMismatch(requested: string, returned: string): Gs1Error | null {
+  function gtinMismatch(requested: string, returned: string, attempts: number): Gs1Error | null {
     if (returned === requested) return null;
     return makeGs1Error(
       "BAD_RESPONSE",
       `GS1 answered with a record for ${returned} but ${requested} was requested.`,
-      { retryable: false, attempts: 0 },
+      { retryable: false, attempts },
     );
   }
 
@@ -845,7 +845,7 @@ export function createGs1UsAdapter(config: Gs1ConnectionConfig, deps: Gs1UsDeps)
               ),
             );
           }
-          const mismatch = gtinMismatch(canonical, record.gtin);
+          const mismatch = gtinMismatch(canonical, record.gtin, res.attempts);
           if (mismatch !== null) return gs1Err(mismatch);
 
           const company = record.company;
@@ -907,7 +907,7 @@ export function createGs1UsAdapter(config: Gs1ConnectionConfig, deps: Gs1UsDeps)
               }),
             );
           }
-          const mismatch = gtinMismatch(canonical, record.gtin);
+          const mismatch = gtinMismatch(canonical, record.gtin, res.attempts);
           if (mismatch !== null) return gs1Err(mismatch);
           return gs1Ok(record, res.attempts, res.durationMs);
         },

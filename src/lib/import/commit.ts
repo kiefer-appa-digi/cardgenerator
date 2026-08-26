@@ -84,8 +84,10 @@ export function planImport(preview: ImportPreview, options: PlanOptions): Import
       op: "upsertProduct",
       ref,
       rowNumber: row.rowNumber,
-      // `applied` already excludes skips, so anything not an update is a create.
-      mode: row.classification === "update" ? "update" : "create",
+      // Driven by whether the row resolved to a record, not by the classification:
+      // with `includeUnchanged` an "unchanged" row still carries an `existingId`,
+      // and calling that a create makes the applier insert a duplicate product.
+      mode: row.match.existingId === null ? "create" : "update",
       existingId: row.match.existingId,
       match: row.match,
       recordType: row.recordType,

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { assets, db } from "@/server/db";
 import { getCurrentUser } from "@/server/auth/current";
+import { readAsset } from "@/server/storage";
 
 /**
  * Assets are served through the app, not straight from blob storage, so that
@@ -10,12 +11,12 @@ import { getCurrentUser } from "@/server/auth/current";
  */
 export async function GET(
   _req: Request,
-  { params }: { params: Promise<{ id: string }> },
+  ctx: RouteContext<"/api/assets/[id]">,
 ) {
   const user = await getCurrentUser();
   if (!user) return new NextResponse("Unauthorized", { status: 401 });
 
-  const { id } = await params;
+  const { id } = await ctx.params;
   const [asset] = await db.select().from(assets).where(eq(assets.id, id)).limit(1);
   if (!asset || asset.orgId !== user.orgId) {
     return new NextResponse("Not found", { status: 404 });
@@ -23,13 +24,10 @@ export async function GET(
   if (asset.scanStatus === "flagged") {
     return new NextResponse("Asset failed malware screening", { status: 403 });
   }
-  if (!asset.storageUrl) return new NextResponse("Not found", { status: 404 });
+  const bytes = await readAsset(asset.storageUrl || asset.storageKey);
+  if (!bytes) return new NextResponse("Not found", { status: 404 });
 
-  const upstream = await fetch(asset.storageUrl);
-  if (!upstream.ok || !upstream.body) {
-    return new NextResponse("Upstream unavailable", { status: 502 });
-  }
-  return new NextResponse(upstream.body, {
+  return new NextResponse(new Uint8Array(bytes), {
     headers: {
       "content-type": asset.contentType,
       "cache-control": "private, max-age=3600",

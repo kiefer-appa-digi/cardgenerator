@@ -16,9 +16,22 @@ export type GtinNormalizeResult =
   | { ok: true; gtin14: string; originalLength: GtinLength; input: string }
   | { ok: false; reason: "empty" | "non-digit" | "bad-length" | "bad-check-digit"; input: string };
 
-/** Strip the separators humans and spreadsheets add: spaces, hyphens, dots. */
+const SEPARATOR = /[\s\-.]/;
+
+/**
+ * Strip the separators humans and spreadsheets add: spaces, hyphens, dots.
+ *
+ * A separator is only a separator *between* digits. A leading "-" is a sign,
+ * and "-810797030124" is a spreadsheet accident — a negated cell, a bad
+ * formula — not a hyphenated GTIN. Stripping it would turn plainly wrong data
+ * into a valid identifier that then gets printed on a card, so an edge
+ * separator is left in place for the digits-only rule to reject.
+ */
 function clean(raw: string): string {
-  return raw.trim().replace(/[\s\-.]/g, "");
+  const trimmed = raw.trim();
+  if (trimmed === "") return "";
+  if (SEPARATOR.test(trimmed[0]) || SEPARATOR.test(trimmed[trimmed.length - 1])) return trimmed;
+  return trimmed.replace(/[\s\-.]/g, "");
 }
 
 /**

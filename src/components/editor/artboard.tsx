@@ -468,7 +468,10 @@ export function Artboard({
                   width={pt(plan.cavity.w)}
                   height={pt(plan.cavity.h)}
                   rx={pt(Math.min(plan.cavity.w, plan.cavity.h) / 6)}
-                  fill="rgba(232,38,39,0.05)"
+                  // Outline only. A tint over the cavity footprint would cover
+                  // most of the card and quietly bias every colour judgement the
+                  // designer makes on it.
+                  fill="none"
                   stroke="#e82627"
                   strokeWidth={overlayStroke}
                   strokeDasharray={`${5 / z} ${3 / z}`}
@@ -478,7 +481,7 @@ export function Artboard({
                   y={pt(plan.cavity.y) + 9 / z}
                   textAnchor="middle"
                   fill="#e82627"
-                  opacity={0.75}
+                  opacity={0.9}
                   style={{ fontSize: `${7 / z}px`, fontFamily: "Inter", letterSpacing: `${0.4 / z}px` }}
                 >
                   CAVITY

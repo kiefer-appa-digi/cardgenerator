@@ -78,8 +78,20 @@ export type SheetRead = {
 const DEFAULT_MAX_ROWS = 50_000;
 const DEFAULT_MAX_COLUMNS = 512;
 /** Rows scanned when looking for the header row. */
-const HEADER_SCAN_ROWS = 25;
+const HEADER_SCAN_ROWS = 50;
+/**
+ * Rows sampled to learn how wide a full row of this sheet is. It has to reach
+ * past the header scan window: a sheet whose first rows are all one-cell notice
+ * lines would otherwise make a one-cell row look like a complete header.
+ */
+const HEADER_WIDTH_SAMPLE_ROWS = 200;
 const SAMPLES_PER_COLUMN = 5;
+
+/** A ceiling supplied by a caller is only honoured when it is a usable count. */
+function positiveLimit(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.floor(value));
+}
 
 /* ----------------------------------------------------------------- values */
 
@@ -180,8 +192,8 @@ export async function parseWorkbook(
   data: WorkbookData,
   options: ParseOptions = {},
 ): Promise<ParsedWorkbook> {
-  const maxRows = options.maxRows ?? DEFAULT_MAX_ROWS;
-  const maxColumns = options.maxColumns ?? DEFAULT_MAX_COLUMNS;
+  const maxRows = positiveLimit(options.maxRows, DEFAULT_MAX_ROWS);
+  const maxColumns = positiveLimit(options.maxColumns, DEFAULT_MAX_COLUMNS);
 
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(toArrayBuffer(data));
@@ -282,7 +294,24 @@ function findHeaderRow(grid: ParsedCell[][]): HeaderChoice {
     if (rowIsBlank(grid[i])) continue;
     window.push(rowStats(grid[i], i + 1));
   }
-  const maxFilled = window.reduce((m, s) => Math.max(m, s.filled), 0);
+
+  /**
+   * How wide a complete row of this sheet is. Sampled well past the header scan
+   * window on purpose: measuring it only over the candidates would let a run of
+   * narrow banner lines set the bar to their own width, and a one-cell notice
+   * line would then pass as a full header row.
+   */
+  let maxFilled = 0;
+  let sampled = 0;
+  for (let i = firstNonBlank; i < grid.length && sampled < HEADER_WIDTH_SAMPLE_ROWS; i += 1) {
+    const row = grid[i];
+    if (rowIsBlank(row)) continue;
+    sampled += 1;
+    let filled = 0;
+    for (const cell of row) if (cell.text.length > 0) filled += 1;
+    if (filled > maxFilled) maxFilled = filled;
+  }
+  if (maxFilled === 0) maxFilled = 1;
 
   const hasDataBelow = (rowNumber: number): boolean => {
     for (let i = rowNumber; i < grid.length; i += 1) {
@@ -571,6 +600,18 @@ export function inspectParsedSheet(sheet: ParsedSheet): SheetInspection {
   };
 }
 
+/** "The sheet the user probably means": most data rows among product-ish sheets. */
+function pickPrimarySheet<T extends { kind: SheetKind; dataRowCount: number }>(
+  sheets: readonly T[],
+): T | undefined {
+  return [...sheets]
+    .filter((s) => s.dataRowCount > 0)
+    .sort((a, b) => {
+      const rank = (k: SheetKind): number => (k === "products" ? 2 : k === "bom" ? 1 : 0);
+      return rank(b.kind) - rank(a.kind) || b.dataRowCount - a.dataRowCount;
+    })[0];
+}
+
 export function inspectParsedWorkbook(workbook: ParsedWorkbook): WorkbookInspection {
   const sheets = workbook.sheets.map((s) => {
     const inspection = inspectParsedSheet(s);
@@ -582,14 +623,7 @@ export function inspectParsedWorkbook(workbook: ParsedWorkbook): WorkbookInspect
     return { ...inspection, profileMatches };
   });
 
-  // "The sheet the user probably means": most data rows among product-ish sheets.
-  const ranked = [...sheets]
-    .filter((s) => s.dataRowCount > 0)
-    .sort((a, b) => {
-      const rank = (k: SheetKind): number => (k === "products" ? 2 : k === "bom" ? 1 : 0);
-      return rank(b.kind) - rank(a.kind) || b.dataRowCount - a.dataRowCount;
-    });
-  const primary = ranked[0];
+  const primary = pickPrimarySheet(sheets);
 
   return {
     filename: workbook.filename,
@@ -620,12 +654,20 @@ export function readParsedSheetRows(
   workbook: ParsedWorkbook,
   options: ReadSheetOptions = {},
 ): SheetRead {
-  const sheet =
+  // With no sheet named, read the sheet the inspection would offer the user —
+  // not sheets[0], which on a workbook with a cover or notes tab is a sheet with
+  // no data at all, and would have returned zero rows without saying why.
+  const named =
     options.sheetName === undefined
-      ? workbook.sheets[0]
+      ? undefined
       : workbook.sheets.find((s) => s.name === options.sheetName);
+  let sheet = named;
+  if (options.sheetName === undefined) {
+    const ranked = workbook.sheets.map((s) => ({ sheet: s, ...inspectParsedSheet(s) }));
+    sheet = pickPrimarySheet(ranked)?.sheet ?? workbook.sheets[0];
+  }
   if (sheet === undefined) {
-    throw new Error(`Sheet not found: ${options.sheetName ?? "(first sheet)"}`);
+    throw new Error(`Sheet not found: ${options.sheetName ?? "(no sheets in workbook)"}`);
   }
 
   const inspection = inspectParsedSheet(sheet);
@@ -644,7 +686,10 @@ export function readParsedSheetRows(
   for (let i = headerRowNumber; i < sheet.grid.length; i += 1) {
     const row = sheet.grid[i];
     if (rowIsBlank(row)) continue;
-    const cells: Record<string, string> = {};
+    // Null prototype: a column headed "__proto__" is a legal spreadsheet header,
+    // and assigning it on a normal object is silently swallowed — the column's
+    // data would vanish from the provenance record without a word.
+    const cells: Record<string, string> = Object.create(null) as Record<string, string>;
     for (let c = 0; c < resolved.headers.length; c += 1) {
       cells[resolved.headers[c]] = (row[c] ?? EMPTY_CELL).text;
     }

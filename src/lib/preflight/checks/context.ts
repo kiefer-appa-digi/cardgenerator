@@ -249,7 +249,10 @@ export function opPaintsInk(op: DrawOp): boolean {
     case "line":
       return op.stroke.space !== "none" && op.strokeWidth > 0;
     case "text":
-      return op.spans.length > 0 || op.fill.space !== "none";
+      // Spans carry their own colour, so counting spans alone said "this side
+      // has content" about a block set in `none` — which images as a blank
+      // plate. A run has to have somewhere to put ink before it counts.
+      return op.spans.some((s) => s.color.space !== "none") || op.fill.space !== "none";
     case "image":
       return op.assetId !== null && !op.missing;
     case "barcode":

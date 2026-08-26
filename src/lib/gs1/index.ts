@@ -23,10 +23,24 @@ import { Gs1ConnectionConfigSchema } from "./types";
 
 export type Gs1AdapterDeps = Partial<Gs1UsDeps>;
 
+function isHttpUrl(raw: string): boolean {
+  try {
+    const parsed = new URL(raw);
+    return parsed.protocol === "https:" || parsed.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
 function reasonToDisable(config: Gs1ConnectionConfig): string | null {
   if (config.provider === "disabled") return "No GS1 connection is enabled. Add one under Settings → Integrations.";
   if (!config.enabled) return "The GS1 connection exists but is switched off.";
   if (config.baseUrl.trim() === "") return "The GS1 connection has no base URL.";
+  // An unparseable base URL is a settings mistake, and saying so once beats
+  // returning a NETWORK error on every product in a batch of two hundred.
+  if (!isHttpUrl(config.baseUrl.trim())) {
+    return "The GS1 base URL is not a valid http(s) URL.";
+  }
   if (config.authMode !== "none" && config.credential === "") {
     return "The GS1 connection has no stored credential, or it could not be decrypted.";
   }

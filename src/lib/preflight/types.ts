@@ -132,14 +132,23 @@ export const PreflightProfileSchema = z.object({
   criticalImageDpi: z.number().int().default(200),
   /** Bleed art must cover at least this fraction of the bleed box (bps). */
   bleedCoverageBps: z.number().int().default(10_000),
-  /** Total ink limit, tenths of a percent. */
+  /**
+   * Total ink limit, tenths of a percent — the press's number.
+   * `BlackRules.totalAreaCoverageLimit` carries the organisation's. The lower of
+   * the two is enforced and the finding names which one set it, so neither
+   * control is a setting that quietly does nothing.
+   */
   inkLimit: z.number().int().default(3_000),
   /** UPC-A/EAN-13 magnification bounds per GS1 General Specifications (bps). */
   barcodeMinMagnificationBps: z.number().int().default(8_000),
   barcodeMaxMagnificationBps: z.number().int().default(20_000),
   /** Minimum print contrast between bars and background, as ΔK tenths of a %. */
   barcodeMinContrast: z.number().int().default(700),
-  /** Rich black is flagged under this text size (µpt). */
+  /**
+   * Rich black is flagged under this text size (µpt) — the press's number.
+   * `BlackRules.richBlackMinTextSize` carries the organisation's. The LARGER of
+   * the two is enforced, because a bigger threshold flags more type.
+   */
   richBlackMinTextSize: z.number().int().default(14_000_000),
   /** Errors block a production export in addition to blocking findings. */
   treatErrorAsBlocking: z.boolean().default(false),

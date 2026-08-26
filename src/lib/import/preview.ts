@@ -106,11 +106,29 @@ function normPart(value: string): string {
   return value.trim().toUpperCase();
 }
 
-/** Brand names contain spaces, so the two parts are joined with a character no cell can hold. */
-const KEY_SEP = "\u0000";
+/**
+ * Brand names contain spaces, so the two parts are joined with a sentinel a part
+ * number cannot hold. It has to be a *printable* one: this key is published on
+ * `RowMatch.key` and travels into stored JSON, and U+0000 cannot be represented
+ * in Postgres `jsonb`, so it is stripped on the way out - silently fusing
+ * "axletek" + "11-500" and "axletek1" + "1-500" into a single key.
+ */
+const KEY_SEP = "\u241F";
 
 function brandSkuKey(brand: string, sku: string): string {
   return `${normBrand(brand)}${KEY_SEP}${normPart(sku)}`;
+}
+
+/**
+ * A source row is keyed by header text, and a header is whatever the spreadsheet
+ * holds — "__proto__" and "constructor" included. Read straight off a plain
+ * object those hand back something from `Object.prototype` rather than a cell,
+ * which crashed the extractor on `.trim()`.
+ */
+function cellText(cells: Record<string, string>, header: string): string {
+  if (!Object.prototype.hasOwnProperty.call(cells, header)) return "";
+  const value = cells[header];
+  return typeof value === "string" ? value : "";
 }
 
 const TRUE_WORDS = new Set(["y", "yes", "true", "t", "1"]);
@@ -178,7 +196,11 @@ function buildFieldIndex(mapping: SheetMapping): FieldIndex {
     if (col.field === "meta.ignore") continue;
 
     const def = getTargetField(col.field);
-    const bucket = def !== undefined && def.multiple ? multi : scalar;
+    // A key that is not a target field is a broken mapping, not a new field.
+    // `mappingLevelFindings` reports it; dropping it here keeps the invented key
+    // out of the product values the plan would otherwise carry into the applier.
+    if (def === undefined) continue;
+    const bucket = def.multiple ? multi : scalar;
     const list = bucket.get(col.field);
     if (list === undefined) bucket.set(col.field, [entry]);
     else list.push(entry);
@@ -191,31 +213,33 @@ type Extracted = {
   custom: Record<string, string>;
   lists: Map<string, string[]>;
   columnOf: Map<string, number>;
+  /** Single-valued fields that had a column on this sheet but no value in this row. */
+  blankFields: Set<string>;
 };
 
 function extractRow(row: SourceRow, index: FieldIndex, mapping: SheetMapping): Extracted {
   const fields: Record<string, string> = {};
   const columnOf = new Map<string, number>();
+  const blankFields = new Set<string>();
 
   for (const [field, sources] of index.scalar) {
+    let found = false;
     for (const src of sources) {
-      const value = (row.cells[src.header] ?? "").trim();
+      const value = cellText(row.cells, src.header).trim();
       if (value.length === 0) continue;
       fields[field] = value;
       columnOf.set(field, src.columnIndex);
+      found = true;
       break; // First column that actually has a value wins.
     }
-  }
-  // Defaults fill gaps only; they never override a value the sheet supplied.
-  for (const [field, value] of Object.entries(mapping.defaults)) {
-    if (fields[field] === undefined && value.length > 0) fields[field] = value;
+    if (!found) blankFields.add(field);
   }
 
   const lists = new Map<string, string[]>();
   for (const [field, sources] of index.multi) {
     const values: string[] = [];
     for (const src of sources) {
-      const raw = (row.cells[src.header] ?? "").trim();
+      const raw = cellText(row.cells, src.header).trim();
       if (raw.length === 0) continue;
       if (!columnOf.has(field)) columnOf.set(field, src.columnIndex);
       for (const part of splitFieldValue(field, raw)) {
@@ -225,13 +249,30 @@ function extractRow(row: SourceRow, index: FieldIndex, mapping: SheetMapping): E
     if (values.length > 0) lists.set(field, values);
   }
 
-  const custom: Record<string, string> = {};
+  // Defaults fill gaps only; they never override a value the sheet supplied. A
+  // default for a list field belongs in that list, not in the scalar bag: routed
+  // there it would ride into the product record as a `product.fitment` column.
+  for (const [field, value] of Object.entries(mapping.defaults)) {
+    if (value.length === 0) continue;
+    const def = getTargetField(field);
+    if (def === undefined || field === "product.custom" || field === "meta.ignore") continue;
+    if (def.multiple) {
+      if (!lists.has(field)) lists.set(field, splitFieldValue(field, value));
+      continue;
+    }
+    if (fields[field] === undefined) {
+      fields[field] = value;
+      blankFields.delete(field);
+    }
+  }
+
+  const custom: Record<string, string> = Object.create(null) as Record<string, string>;
   for (const src of index.custom) {
-    const value = (row.cells[src.header] ?? "").trim();
+    const value = cellText(row.cells, src.header).trim();
     if (value.length > 0) custom[src.header] = value;
   }
 
-  return { fields, custom, lists, columnOf };
+  return { fields, custom, lists, columnOf, blankFields };
 }
 
 /* -------------------------------------------------------------- identifiers */
@@ -360,6 +401,19 @@ function buildIdentifiers(extracted: Extracted): IdentifierResult {
 
 /* ---------------------------------------------------------------- BOM lines */
 
+/**
+ * The line number the sheet gave, or null when it gave none. Null and 0 are not
+ * the same thing: a sheet that numbers its first line 0 said something, and
+ * treating that as "unset" renumbered it to 1 without a word.
+ */
+function parsePosition(text: string): number | null {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return null;
+  if (!/^[0-9]+$/.test(trimmed)) return null;
+  const n = Number.parseInt(trimmed, 10);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
 function buildBomLine(
   extracted: Extracted,
   ownPartNumber: string,
@@ -375,14 +429,13 @@ function buildBomLine(
     component.length > 0 || name.length > 0 || description.length > 0 || quantity.length > 0;
   if (!hasLine || parent.length === 0) return null;
 
-  const positionText = extracted.fields["bomItem.position"] ?? "";
-  const position = Number.parseInt(positionText, 10);
+  const position = parsePosition(extracted.fields["bomItem.position"] ?? "");
 
   return {
     parentPartNumber: parent,
     bomName: extracted.fields["bom.name"] ?? defaultBomName,
     revision: extracted.fields["bom.revision"] ?? "",
-    position: Number.isFinite(position) && position >= 0 ? position : 0,
+    position: position ?? 0,
     quantity: quantity.length === 0 ? "1" : quantity,
     unitOfMeasure: extracted.fields["bomItem.unitOfMeasure"] ?? "",
     name,
@@ -437,13 +490,19 @@ export function buildPreview(input: BuildPreviewInput): ImportPreview {
 
   const gtinRows = new Map<string, number[]>();
   const brandSkuRows = new Map<string, number[]>();
+  const brandSkuLabels = new Map<string, string>();
   const skuRows = new Map<string, number[]>();
   const productPartNumbers = new Set<string>();
 
   for (const d of drafts) {
     if (d.gtinKey.length > 0) push(gtinRows, d.gtinKey, d.source.rowNumber);
     if (d.partNumber.length > 0) {
-      push(brandSkuRows, brandSkuKey(d.brandName, d.partNumber), d.source.rowNumber);
+      const bsKey = brandSkuKey(d.brandName, d.partNumber);
+      push(brandSkuRows, bsKey, d.source.rowNumber);
+      // Keep the spelling the sheet used; the key itself is case-folded.
+      if (!brandSkuLabels.has(bsKey)) {
+        brandSkuLabels.set(bsKey, `${d.brandName} / ${d.partNumber}`);
+      }
       push(skuRows, normPart(d.partNumber), d.source.rowNumber);
       productPartNumbers.add(normPart(d.partNumber));
     }
@@ -717,12 +776,31 @@ export function buildPreview(input: BuildPreviewInput): ImportPreview {
           ),
         );
       }
-      if (bom.position === 0) {
+      const positionText = d.extracted.fields["bomItem.position"] ?? "";
+      const supplied = parsePosition(positionText);
+      if (positionText.trim().length > 0 && supplied === null) {
+        findings.push(
+          finding(
+            IMPORT_FINDING_CODES.BOM_POSITION_INVALID,
+            "warning",
+            `Line number "${positionText}" is not a whole number. The line was placed in sheet order instead.`,
+            {
+              field: "bomItem.position",
+              columnIndex: d.extracted.columnOf.get("bomItem.position") ?? null,
+              value: positionText,
+            },
+          ),
+        );
+      }
+      if (supplied === null) {
         const next = (bomPositionCounter.get(parentKey) ?? 0) + 1;
         bomPositionCounter.set(parentKey, next);
         bom = { ...bom, position: next };
       } else {
-        bomPositionCounter.set(parentKey, Math.max(bomPositionCounter.get(parentKey) ?? 0, bom.position));
+        bomPositionCounter.set(
+          parentKey,
+          Math.max(bomPositionCounter.get(parentKey) ?? 0, supplied),
+        );
       }
     }
 
@@ -731,7 +809,12 @@ export function buildPreview(input: BuildPreviewInput): ImportPreview {
       match.existingId === null ? undefined : existingById.get(match.existingId);
     const changedFields = existingRecord === undefined
       ? []
-      : diffFields(d.extracted.fields, existingRecord, options.treatBlankAsClear ?? false);
+      : diffFields(
+          d.extracted.fields,
+          d.extracted.blankFields,
+          existingRecord,
+          options.treatBlankAsClear ?? false,
+        );
 
     let classification: RowClassification;
     if (recordType === "bom_line") {
@@ -778,7 +861,7 @@ export function buildPreview(input: BuildPreviewInput): ImportPreview {
 
   const duplicateGtins = groupsWithMoreThanOne(gtinRows);
   const duplicatePartNumbersInBrand = groupsWithMoreThanOne(brandSkuRows).map((g) => ({
-    value: g.value.split(KEY_SEP).join(" / "),
+    value: brandSkuLabels.get(g.value) ?? g.value.split(KEY_SEP).join(" / "),
     rowNumbers: g.rowNumbers,
   }));
   const brandOfRow = new Map(drafts.map((d) => [d.source.rowNumber, normBrand(d.brandName)]));
@@ -847,30 +930,59 @@ function mappingLevelFindings(mapping: SheetMapping): ImportFinding[] {
     );
   }
   for (const col of mapping.columns) {
-    if (col.field === null && col.supersededBy !== null) {
+    if (col.field !== null && getTargetField(col.field) === undefined) {
       out.push(
         finding(
-          IMPORT_FINDING_CODES.UNMAPPED_COLUMN_HAS_DATA,
-          "info",
-          `Column "${col.header}" was not mapped: column ${col.supersededBy} matched the same field more strongly.`,
-          { columnIndex: col.columnIndex },
+          IMPORT_FINDING_CODES.MAPPING_UNKNOWN_FIELD,
+          "error",
+          `Column "${col.header}" is mapped to "${col.field}", which is not a target field. Its values would be written under a name nothing reads.`,
+          { field: col.field, columnIndex: col.columnIndex },
         ),
       );
     }
+    // Reported whether the loser ended up unmapped or was demoted to its
+    // runner-up: a column silently re-pointed at a field it merely resembles is
+    // the outcome most worth showing the user, and it used to say nothing.
+    if (col.supersededBy === null) continue;
+    const winner = mapping.columns.find((c) => c.columnIndex === col.supersededBy);
+    const winnerName =
+      winner === undefined ? `column ${col.supersededBy + 1}` : `"${winner.header}"`;
+    out.push(
+      finding(
+        IMPORT_FINDING_CODES.UNMAPPED_COLUMN_HAS_DATA,
+        "info",
+        col.field === null
+          ? `Column "${col.header}" is not mapped: ${winnerName} matched the same field more strongly.`
+          : `Column "${col.header}" lost its best match to ${winnerName} and was mapped to "${col.field}" instead. Confirm that is where it belongs.`,
+        { field: col.field, columnIndex: col.columnIndex },
+      ),
+    );
   }
   return out;
 }
 
+/**
+ * `blankFields` is what makes `treatBlankAsClear` mean anything. Extraction only
+ * ever records non-empty values, so a "blank" field is one that is absent from
+ * `fields` — comparing the entries alone could never see an erased cell, and the
+ * option quietly did nothing.
+ */
 function diffFields(
   fields: Record<string, string>,
+  blankFields: ReadonlySet<string>,
   existing: ExistingProduct,
   treatBlankAsClear: boolean,
 ): string[] {
   const changed: string[] = [];
   for (const [key, value] of Object.entries(fields)) {
     const current = existing.fields[key] ?? "";
-    if (value.length === 0 && !treatBlankAsClear) continue;
     if (value !== current) changed.push(key);
+  }
+  if (treatBlankAsClear) {
+    for (const key of blankFields) {
+      const current = existing.fields[key] ?? "";
+      if (current.length > 0) changed.push(key);
+    }
   }
   changed.sort();
   return changed;

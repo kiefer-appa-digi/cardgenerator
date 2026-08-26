@@ -221,6 +221,22 @@ export function bleedRect(p: CardPresetDef): Rect {
 export function safeRect(p: CardPresetDef): Rect {
   return insetRect(trimRect(p), p.safeArea);
 }
+
+/**
+ * The safe area's OWN corner radius.
+ *
+ * Insetting a rounded rectangle by d shrinks its corner radius by d — the arc
+ * centre does not move. Testing safe-area containment with the *trim's* 0.25 in
+ * radius would therefore reject artwork that is comfortably on the card, which
+ * is exactly the kind of false alarm that teaches an operator to ignore
+ * preflight. Where the insets differ per side the smallest one is used, which
+ * leaves the largest radius and so the strictest test.
+ */
+export function safeCornerRadius(p: CardPresetDef, override?: Insets): Upt {
+  const i = override ?? p.safeArea;
+  const smallest = Math.min(i.top, i.right, i.bottom, i.left);
+  return Math.max(0, p.cornerRadius - smallest);
+}
 /** Cavity overlay in bleed space. */
 export function cavityRect(p: CardPresetDef): Rect {
   const t = trimRect(p);

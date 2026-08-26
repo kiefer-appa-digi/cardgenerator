@@ -163,7 +163,14 @@ export type SidePlan = {
   trim: Rect;
   safe: Rect;
   cavity: Rect;
+  /** The trim's corner radius: the physical card edge. */
   cornerRadius: Upt;
+  /**
+   * The safe area's own corner radius (trim radius minus the safe inset).
+   * Containment inside the safe area must be tested against THIS, not the trim
+   * radius — see safeCornerRadius() in lib/geometry/presets.ts.
+   */
+  safeCornerRadius: Upt;
   background: PrintColor;
   ops: DrawOp[];
   diagnostics: ElementDiagnostics[];

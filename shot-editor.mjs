@@ -1,0 +1,25 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch();
+const ctx = await browser.newContext({ viewport:{width:1700,height:1050}, deviceScaleFactor:2, storageState:"artifacts/state.json" });
+const page = await ctx.newPage();
+page.on('pageerror', e => console.log('PAGEERROR:', String(e.message).slice(0,400)));
+await page.goto("http://localhost:3000/designs/new", {waitUntil:"networkidle"});
+const seedBtn = page.getByRole("button", {name:/Create master templates/});
+if (await seedBtn.count()) { await seedBtn.click(); await page.waitForTimeout(3500); await page.reload({waitUntil:"networkidle"}); }
+const preset = process.env.PRESET || "409TF";
+await page.getByRole("button", {name:new RegExp(preset)}).first().click();
+await page.waitForTimeout(400);
+const tpl = page.getByRole("button", {name:/11-500 master/});
+if (await tpl.count()) await tpl.first().click();
+await page.getByLabel("Search products").fill("11-500");
+await page.waitForTimeout(600);
+await page.getByRole("button").filter({ hasText: /11-500/ }).last().click({timeout:15000});
+await page.getByRole("button", {name:/Create and open editor/}).click();
+await page.waitForURL(/\/edit$/, {timeout:30000});
+await page.waitForTimeout(4000);
+console.log("editor:", page.url());
+await page.screenshot({path:`artifacts/screens/editor-${preset}-front.png`});
+await page.getByRole("button", {name:"back", exact:false}).filter({hasText:/^back/i}).first().click();
+await page.waitForTimeout(2500);
+await page.screenshot({path:`artifacts/screens/editor-${preset}-back.png`});
+await browser.close();
