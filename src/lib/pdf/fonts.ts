@@ -139,10 +139,20 @@ export function knownFaceKeys(): string[] {
   return [...FACE_FILES.keys()].sort();
 }
 
-/** Absolute paths a face's file could live at, in preference order. */
+/**
+ * Absolute paths a face's file could live at, in preference order.
+ *
+ * The `turbopackIgnore` comments matter: without them the bundler sees a
+ * computed path, gives up on static analysis and traces the ENTIRE project into
+ * the serverless bundle — every source file and the whole public folder. The
+ * font directories are declared instead in `outputFileTracingIncludes` in
+ * next.config.ts, which is the explicit, reviewable way to say what ships.
+ */
 export function faceSearchPaths(file: string, fontDir?: string): string[] {
-  if (fontDir) return [path.join(fontDir, file)];
-  return FONT_DIR_CANDIDATES.map((dir) => path.join(process.cwd(), dir, file));
+  if (fontDir) return [path.join(/* turbopackIgnore: true */ fontDir, file)];
+  return FONT_DIR_CANDIDATES.map((dir) =>
+    path.join(/* turbopackIgnore: true */ process.cwd(), dir, file),
+  );
 }
 
 /* ------------------------------------------------- glyf record alignment */

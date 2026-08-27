@@ -36,9 +36,9 @@ export function LayersPanel({ store }: { store: EditorStore }) {
   return (
     <div className="flex h-full flex-col">
       <div className="flex h-8 shrink-0 items-center justify-between border-b border-ink-800 px-3">
-        <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-400">
+        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-ink-400">
           Layers
-        </span>
+        </h2>
         <span className="numeric text-[11px] text-ink-500">{elements.length}</span>
       </div>
 

@@ -10,7 +10,8 @@ import { EditorStore, useEditorSelector } from "@/lib/editor/store";
 import { NUDGE_SHIFT_UPT, NUDGE_UPT } from "@/lib/editor/interaction";
 import { planSide, type AssetInfo } from "@/lib/design/plan";
 import { readElements, rekeyForPaste, writeElements } from "@/lib/editor/clipboard";
-import { saveEditorPreferencesAction, type EditorPreferences } from "@/server/preferences";
+import { saveEditorPreferencesAction } from "@/server/preferences";
+import type { EditorPreferences } from "@/lib/editor/preferences";
 import type { DesignDoc, DesignElement } from "@/lib/design/schema";
 import {
   BarcodeElementSchema, BomListElementSchema, ImageElementSchema,

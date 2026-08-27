@@ -134,9 +134,9 @@ export function DataPanel({
   return (
     <div className="flex h-full flex-col">
       <div className="flex h-8 shrink-0 items-center justify-between border-b border-ink-800 px-3">
-        <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-400">
+        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-ink-400">
           Product data
-        </span>
+        </h2>
       </div>
 
       <button

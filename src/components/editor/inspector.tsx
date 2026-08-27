@@ -51,9 +51,9 @@ export function Inspector({
   return (
     <div className="flex h-full flex-col overflow-y-auto">
       <div className="flex h-8 shrink-0 items-center justify-between border-b border-ink-800 px-3">
-        <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-400">
+        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-ink-400">
           {multi ? `${selected.length} selected` : el.kind}
-        </span>
+        </h2>
         {(el.locked || el.templateLocked) && !multi ? (
           <span className="rounded bg-ink-700 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-sev-warning">
             {el.templateLocked ? "brand locked" : "locked"}
@@ -639,9 +639,9 @@ function SideProperties({ store }: { store: EditorStore }) {
   return (
     <div className="flex h-full flex-col overflow-y-auto">
       <div className="flex h-8 shrink-0 items-center border-b border-ink-800 px-3">
-        <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-400">
+        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-ink-400">
           {side} side
-        </span>
+        </h2>
       </div>
 
       <Section title="Colour intent">
@@ -751,6 +751,10 @@ export function LengthField({
       <span className="mb-1 block text-[10px] uppercase tracking-wide text-ink-500">{label}</span>
       <div className="relative">
         <input
+          // Named explicitly: the unit suffix sits inside the same <label>, so
+          // without this the field announces as "X in" and a screen-reader user
+          // hears the unit as part of the field's name.
+          aria-label={label}
           value={draft}
           disabled={disabled}
           onChange={(e) => setDraft(e.target.value)}
@@ -772,7 +776,10 @@ export function LengthField({
           )}
           aria-invalid={invalid}
         />
-        <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-ink-500">
+        <span
+          aria-hidden
+          className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-ink-500"
+        >
           {unit}
         </span>
       </div>
@@ -828,6 +835,7 @@ export function NumberField({
       <div className="relative">
         <input
           type="number"
+          aria-label={label}
           value={draft}
           disabled={disabled}
           min={min}
@@ -845,7 +853,10 @@ export function NumberField({
           className="numeric h-7 w-full rounded border border-ink-700 bg-ink-850 px-2 text-xs text-ink-100 focus:border-brand-500 disabled:opacity-50 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none"
         />
         {suffix ? (
-          <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-ink-500">
+          <span
+            aria-hidden
+            className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-ink-500"
+          >
             {suffix}
           </span>
         ) : null}
