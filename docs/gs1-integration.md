@@ -330,14 +330,21 @@ conflict. Fields empty on both sides are omitted.
    `gs1_sync_records` row with `operation: "verify"` (or `"enrich"`), the
    redacted `remote_payload` and the computed `diff`. **Nothing is written to
    the product.**
-2. The product screen shows the diff field by field: local value, remote value,
-   status.
+2. **`/settings/gs1/verify`** shows the diff field by field: local value, remote
+   value, status (`src/components/settings/gs1-verify.tsx`). That screen — not
+   the product screen — is where verification lives; `/products/[id]` carries no
+   GS1 control at all, which is a UX gap worth closing but is not a correctness
+   one.
 3. **`acceptGs1FieldsAction({ syncId, paths })`** — writes exactly the fields a
    person ticked, and **only if those fields are still marked acceptable on the
    stored diff**, so a stale acceptance list cannot write a value nobody saw.
    `accepted_by`, `accepted_at` and `accepted_fields` are recorded.
-4. `recentGs1SyncsAction(productId)` shows the history, and
-   `revisions.gs1_sync_state` carries the state onto a card revision (§20).
+4. `gs1SettingsViewAction()` returns the ten most recent `gs1_sync_records` for
+   the organisation — id, GTIN, product, operation, status, accepted fields,
+   error, timestamp — and `/settings/gs1` renders them. `revisions.gs1_sync_state`
+   carries the state onto a card revision (§20). **There is no per-product sync
+   history view**, and no `recentGs1SyncsAction`; earlier drafts of this document
+   named one that was never written.
 
 Asserted: "applies exactly the accepted paths and nothing else" · "never mutates
 the local context it was given" · "rejects a path that is not in the diff, and
@@ -439,10 +446,15 @@ changes, and **nothing in the codebase throws "not implemented"**.
 
 This is the requirement, so here is the evidence rather than the assurance.
 
-1. **The current deployment has zero GS1 connection rows.** The seeded database
-   holds 0 rows in `gs1_connections`, `gs1_sync_records` and `gs1_request_logs`,
-   and 392 products, 3 presets, 3 master templates, a design with 10 revisions
-   and 3 export artifacts were all produced without one.
+1. **The catalogue was built with GS1 switched off.** All 392 products, the
+   3 presets, the 3 master templates and the 3 export artifacts were produced
+   while `gs1_connections` was empty — no verification, no enrichment and no
+   registry lookup contributed to any of them. (A `custom` provider row pointed
+   at a local mock server has since been added to exercise the connector; it
+   changed no product data, and the one `gs1_sync_records` row it produced is a
+   `verify`.) The evidence that GS1 is optional is points 2–7 below, which are
+   properties of the code rather than of whatever happens to be in the database
+   this week.
 2. **GTIN validation is local.** Check digits, length and the GTIN-8/12/13/14
    normalisation are arithmetic in `src/lib/barcode/gtin.ts` and
    `src/lib/gs1/gtin.ts`. Barcode generation never asks a registry anything.

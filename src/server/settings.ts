@@ -64,11 +64,35 @@ const ExportPolicySchema = z.object({
   allowOverride: z.boolean(),
 });
 
+/**
+ * Every field of `PreflightProfileSchema` is an unbounded `int` with a default,
+ * because the profile is also parsed from whatever is already in the database
+ * and must never fail to load. An *input* has no such excuse: a `minImageDpi` of
+ * -5 is in shape and would silently switch the low-resolution check off. The
+ * bounds below are exactly the ones the form enforces, so nothing a person can
+ * legitimately type is refused here — this only stops values that could not have
+ * come from the screen.
+ */
+const BoundedPreflightProfileSchema = PreflightProfileSchema.omit({
+  treatErrorAsBlocking: true,
+}).extend({
+  name: z.string().trim().min(1).max(120),
+  minImageDpi: z.number().int().min(72).max(2400),
+  criticalImageDpi: z.number().int().min(36).max(2400),
+  bleedCoverageBps: z.number().int().min(0).max(10_000),
+  inkLimit: z.number().int().min(1_000).max(4_000),
+  barcodeMinMagnificationBps: z.number().int().min(5_000).max(30_000),
+  barcodeMaxMagnificationBps: z.number().int().min(5_000).max(30_000),
+  barcodeMinContrast: z.number().int().min(0).max(1_000),
+  /** µpt. 0 means "never flag"; the ceiling is 288 pt, far above any body copy. */
+  richBlackMinTextSize: z.number().int().min(0).max(288_000_000),
+});
+
 const OrganisationSettingsInputSchema = z.object({
   blackRules: BlackRulesSchema,
   // `treatErrorAsBlocking` lives on the export policy; the profile takes its
   // copy from there at read time so the two can never disagree.
-  preflightProfile: PreflightProfileSchema.omit({ treatErrorAsBlocking: true }),
+  preflightProfile: BoundedPreflightProfileSchema,
   exportPolicy: ExportPolicySchema,
 });
 
@@ -327,7 +351,13 @@ export async function setUserRoleAction(input: unknown): Promise<ActionResult> {
   const { userId, role } = parsed.data;
 
   const [target] = await db
-    .select({ id: users.id, orgId: users.orgId, email: users.email, role: users.role })
+    .select({
+      id: users.id,
+      orgId: users.orgId,
+      email: users.email,
+      role: users.role,
+      active: users.active,
+    })
     .from(users)
     .where(and(eq(users.id, userId), eq(users.orgId, actor.orgId)))
     .limit(1);
@@ -336,7 +366,12 @@ export async function setUserRoleAction(input: unknown): Promise<ActionResult> {
 
   // Losing the last admin locks the organisation out of its own settings, GS1
   // credentials and blocking-error overrides. Refused rather than warned about.
-  if (target.role === "admin" && role !== "admin") {
+  //
+  // The guard only applies to an admin who is currently active: a deactivated
+  // admin is not one of the admins who can still sign in, so demoting them
+  // cannot take the last one away, and refusing it would block a legitimate
+  // tidy-up with a sentence that is not true of the account being changed.
+  if (target.active && target.role === "admin" && role !== "admin") {
     const [{ n }] = await db
       .select({ n: sql<number>`count(*)::int` })
       .from(users)

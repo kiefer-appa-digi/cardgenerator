@@ -459,8 +459,16 @@ export default async function ProductPage({ params }: PageProps<"/products/[id]"
                       >
                         <span className="min-w-0">
                           <span className="block truncate text-[13px] text-ink-100">{d.name}</span>
+                          {/* With the time, not just the date: designs are
+                              ordered by this and several revisions of the same
+                              card are routinely made in one sitting, which a
+                              date alone renders as identical rows. */}
                           <span className="numeric text-[11px] text-ink-500">
-                            updated {d.updatedAt.toLocaleDateString()}
+                            updated{" "}
+                            {d.updatedAt.toLocaleString(undefined, {
+                              dateStyle: "medium",
+                              timeStyle: "short",
+                            })}
                           </span>
                         </span>
                         <span className="flex shrink-0 items-center gap-2">

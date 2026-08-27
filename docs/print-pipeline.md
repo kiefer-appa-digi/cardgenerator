@@ -263,7 +263,7 @@ value.
 
 Four preflight checks enforce them (`src/lib/preflight/checks/color.ts`):
 
-- **`INK_LIMIT_EXCEEDED`** — a recipe over the limit. Asserted by
+- **`INK_LIMIT`** — a recipe over the limit. Asserted by
   `tests/unit/preflight.test.ts` ("flags a recipe over the ink limit"), and the
   organisation's limit is honoured when it is tighter than the profile's
   ("enforces the organisation's total ink limit when it is tighter than the
@@ -271,7 +271,7 @@ Four preflight checks enforce them (`src/lib/preflight/checks/color.ts`):
 - **`RICH_BLACK_SMALL_TEXT`** — rich black on type under the threshold ("flags
   small type set in rich black"). The stricter of the profile and the
   organisation threshold wins.
-- **`GRAYSCALE_BACK_VIOLATION`** — colour ink on a standard back. §7 requires the
+- **`GRAYSCALE_VIOLATION`** — colour ink on a standard back. §7 requires the
   standard back template to flag non-grayscale content, and §7 equally requires
   that an authorised template be allowed to use colour: the check softens when
   the template permits it ("flags colour ink on a grayscale back and softens it
@@ -349,8 +349,12 @@ A UPC-A at 100 % magnification is **1.469 in wide including quiet zones**, and
 *planned* card:
 
 `GTIN_INVALID` · `BARCODE_VALUE_INVALID` · `BARCODE_QUIET_ZONE` ·
-`BARCODE_SIZE` · `BARCODE_MAGNIFICATION` · `BARCODE_CONTRAST` ·
-`BARCODE_CLIPPED` · `SAFE_AREA_BARCODE` · cavity conflict.
+`BARCODE_SIZE` · `BARCODE_TRUNCATED_HEIGHT` · `BARCODE_CONTRAST` ·
+`BARCODE_CLIPPED` · `SAFE_AREA_BARCODE` · `CAVITY_CONFLICT`.
+
+There is no separate `BARCODE_MAGNIFICATION` code: a magnification outside the
+symbology's range, and a magnification the generator had to adjust, are both
+reported under `BARCODE_SIZE`.
 
 The quiet-zone check is measured **from the bars, not from the symbol box** — a
 caption sitting in the human-readable band is not an intrusion, and a block
@@ -381,12 +385,18 @@ The embedding and subsetting mechanics are below under
 [Font embedding and subsetting](#font-embedding-and-subsetting). The parts
 either side of that:
 
-**Only shipped fonts can be used.** `src/lib/text/fonts.ts` registers three
-families — Inter (5 faces), Archivo (4), Barlow Condensed (4) — all **SIL Open
-Font Licence 1.1**, which permits embedding and redistribution
-(`src/assets/fonts/OFL.txt`). §9 requires that fonts used for export be legally
-available and embeddable; restricting the picker to fonts the application ships
-is how that is guaranteed rather than hoped for.
+**Only shipped fonts can be used.** `src/lib/text/fonts.ts` registers five
+families — Inter (5 faces), Archivo (4), Barlow Condensed (4), Oswald (5) and
+Bebas Neue (1), **nineteen faces** in all — every one declared **SIL Open Font
+Licence 1.1**, which permits embedding and redistribution. §9 requires that fonts
+used for export be legally available and embeddable; restricting the picker to
+fonts the application ships is how that is guaranteed rather than hoped for.
+
+**One licensing loose end.** The shipped `src/assets/fonts/OFL.txt` carries only
+the Inter copyright notice. OFL-1.1 §1 requires each family's own notice to be
+redistributed with it, so Archivo, Barlow Condensed, Oswald and Bebas Neue are
+currently shipped without theirs. The licence terms are right; the attribution
+file is incomplete, and that has not been fixed.
 
 **Metrics come from the same bytes pdf-lib embeds.**
 `scripts/gen-font-metrics.ts` reads the shipped TTFs with the same
@@ -461,10 +471,12 @@ Two things `src/lib/pdf/fonts.ts` has to add on top of what pdf-lib does:
    `/BaseFont /Inter-SemiBold-9742` for a subset. ISO 32000-1 §9.6.4 and every
    part of PDF/X require a subset font name to carry a six-uppercase-letter tag
    and a `+`, and require *different subsets to carry different tags*.
-   `finaliseFontSubsets()` rewrites the name to `ABCDEF+Inter-SemiBold` on the
-   Type0 font, the descendant CIDFont and the FontDescriptor, after `doc.flush()`
-   has materialised the dictionaries — and the FontFile2 program the tag is
-   derived from.
+   `finaliseFontSubsets()` prefixes the tag on the Type0 font, the descendant
+   CIDFont and the FontDescriptor, after `doc.flush()` has materialised the
+   dictionaries — and the FontFile2 program the tag is derived from. pdf-lib's
+   own numeric suffix is **kept**, so the finished `/BaseFont` reads e.g.
+   `/LNFHQL+Archivo-ExtraBold-8784` — measured out of `409TF-production.pdf` —
+   not `/LNFHQL+Archivo-ExtraBold`.
 
    The tag is a hash of the face key **and the embedded program**, not of the face
    key alone. `PDFContext`'s RNG is seeded, so two cards that use the same
@@ -485,10 +497,18 @@ Two things `src/lib/pdf/fonts.ts` has to add on top of what pdf-lib does:
    arrow glyph, and Archivo's `rvrn` swaps `$` for a variable-font bracket-layer
    variant. The PDF would then set text at different widths than the editor
    measured, and a line that fitted on screen could overrun the safe area on
-   press. `PDF_SHAPING_FEATURES` disables every substitution feature. That was
-   verified to reproduce the layout engine's glyph selection exactly for every
-   ordered pair of characters in the generated metrics charset across all
-   thirteen shipped faces.
+   press. `PDF_SHAPING_FEATURES` disables every substitution feature.
+
+   **What actually guards this, precisely.** `tests/unit/pdf.test.ts` "does not
+   apply OpenType shaping, so PDF advances match the layout engine" sets the one
+   string `off->staff` in Archivo 400 and asserts it decodes back one glyph per
+   code point — which catches `liga` and `calt` on that face and nothing more. It
+   is **not** an exhaustive sweep of character pairs across every face, and
+   earlier drafts of this document said it was. The exhaustive per-face check is
+   a different test — "every glyph in every embedded face matches the source
+   outline" — which does iterate every shipped face over the whole generated
+   metrics charset, but compares advance widths and outlines rather than shaping
+   decisions.
 
    The single known exception is U+00AD SOFT HYPHEN, which fontkit's cmap
    handling maps differently from `glyphForCodePoint`. It is absent from the

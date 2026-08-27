@@ -167,6 +167,13 @@ export default async function ExportsPage() {
               <tbody>
                 {jobs.map((j) => {
                   const files = byJob.get(j.id) ?? [];
+                  // A multi-item run is not one of its files: naming a 40-card
+                  // batch after whichever card happened to be written first
+                  // reads as though that is all it produced.
+                  const label =
+                    j.totalItems > 1
+                      ? `${j.totalItems} cards`
+                      : (files[0]?.filename ?? "No file produced");
                   return (
                     <Fragment key={j.id}>
                     <tr
@@ -178,7 +185,7 @@ export default async function ExportsPage() {
                           className="inline-flex items-center gap-2 font-medium text-ink-100 hover:text-brand-300"
                         >
                           <Badge tone={KIND_TONE[j.kind] ?? "neutral"}>{j.kind}</Badge>
-                          {files[0]?.filename ?? "No file produced"}
+                          <span className="whitespace-nowrap">{label}</span>
                         </Link>
                       </th>
                       <td className="px-4 py-2.5">
@@ -196,7 +203,7 @@ export default async function ExportsPage() {
                           </span>
                         ) : null}
                       </td>
-                      <td className="numeric px-4 py-2.5 text-right text-ink-300">
+                      <td className="numeric whitespace-nowrap px-4 py-2.5 text-right text-ink-300">
                         {j.completedItems} / {j.totalItems}
                         {j.failedItems ? (
                           <span className="ml-1.5 text-sev-blocking">+{j.failedItems} failed</span>
@@ -212,11 +219,11 @@ export default async function ExportsPage() {
                                 <a
                                   href={`/api/artifacts/${f.id}`}
                                   download
-                                  className="text-[12px] text-brand-300 hover:text-brand-200"
+                                  className="whitespace-nowrap text-[12px] text-brand-300 hover:text-brand-200"
                                 >
                                   {f.filename}
                                 </a>
-                                <span className="numeric ml-2 text-[11px] text-ink-500">
+                                <span className="numeric ml-2 whitespace-nowrap text-[11px] text-ink-500">
                                   {formatBytes(f.byteSize)}
                                 </span>
                               </li>
@@ -227,7 +234,7 @@ export default async function ExportsPage() {
                       <td className="px-4 py-2.5 text-ink-300">
                         {j.authorName || j.authorEmail || "unknown"}
                       </td>
-                      <td className="numeric px-4 py-2.5 text-ink-400">
+                      <td className="numeric whitespace-nowrap px-4 py-2.5 text-ink-400">
                         {j.createdAt.toLocaleString()}
                       </td>
                     </tr>

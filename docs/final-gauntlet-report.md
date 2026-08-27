@@ -15,18 +15,26 @@ $ npx tsc --noEmit
 (no output — clean)
 
 $ npx vitest run
- Test Files  10 passed (10)
-      Tests  465 passed | 1 skipped (466)
-   Duration  1.37 s
+ Test Files  12 passed (12)
+      Tests  474 passed | 1 skipped (475)
+   Duration  1.40 s
 ```
 
 The one skipped test is `describe.runIf(process.env.PDF_ARTIFACT_DIR)`, the
 opt-in hook that writes real PDFs to disk. It is not a disabled test.
 
 Also read for this report: the full `src/` tree, the database
-(392 products, 3 presets, 3 master templates, 1 committed import, 3 export
-artifacts, 10 revisions, 0 GS1 connections), the three CAD PDFs, and the
-supplied workbook.
+(392 products, 3 presets, 3 master templates, 3 committed imports of the one
+workbook, 6 designs carrying 1 revision each, 26 `design_elements` rows, 3
+export artifacts, 27 audit-log rows, and 1 GS1 connection row pointing at a
+local mock server), the three CAD PDFs, and the supplied workbook.
+
+**Read every row count in this report as a snapshot, not an invariant.** The
+development database is shared and is still being written to; the counts above
+were re-measured immediately before this revision of the report, and any of them
+may have moved since. Nothing in the verdicts below depends on a row count —
+where one is quoted it is illustration, and the evidence is the file path or the
+test name beside it.
 
 ## Scoreboard
 
@@ -38,8 +46,8 @@ supplied workbook.
 | §5 Spreadsheet / BOM ingestion | **PARTIAL** |
 | §6 WYSIWYG editor | **PARTIAL** |
 | §7 Front and back | **PASS** |
-| §8 Background upload | **FAIL** |
-| §9 Text system | **PASS** |
+| §8 Background upload | **PARTIAL** |
+| §9 Text system | **PARTIAL** |
 | §10 Variable data / binding | **PASS** |
 | §11 BOM "This Pack Includes" | **PASS** |
 | §12 Barcode system | **PASS** |
@@ -64,13 +72,15 @@ supplied workbook.
 
 | Severity | Finding |
 | --- | --- |
-| **Blocker** | **§8 — an image element cannot be given an asset from the editor.** `src/components/editor/inspector.tsx:527` renders fit, background and focal controls for an image element but **no asset picker**. Nothing in `src/components/editor/` writes `assetId`. Uploads work (`/settings/assets`), the plan, preflight and PDF writer all handle placed images correctly — but a designer cannot place one. §8's core requirement ("Users must be able to upload a background to either card side") is not met in the editor. |
+| ~~Blocker~~ **CLOSED** | **§8 — an image element could not be given an asset from the editor.** Closed during this review: `src/components/editor/asset-picker.tsx` is now rendered by `inspector.tsx:558`, lists and filters the org's assets, uploads from inside the card, and writes `assetId`. Re-verified end to end from `/designs/[id]/edit/page.tsx` down. |
 | **Critical** | **§23 — the benchmark has never been compared with the sample.** `11-500 front.pdf` and `11-500 back.pdf` were **not supplied**. The master templates reproduce the content model described in the brief; nobody has checked them against the real package. |
 | **Critical** | **No automated test covers `src/server/*`.** Revision immutability, organisation isolation, the RBAC matrix, the blocking-export gate and the override, the import commit transaction and the batch resume are the highest-consequence paths in the system and are verified only by reading the code. |
 | **Major** | **§5 — the multi-sheet BOM workbook was never supplied.** The adapter architecture and the BOM import path are proven against synthetic fixtures only. |
 | **Major** | **§13B — the publish path is not wired.** `publishProduct()` is implemented and tested at the adapter layer; no server action calls it and no screen offers it. |
-| **Major** | **§24 — no copy/paste, no group/ungroup, no context menu.** All three are named requirements. `group` exists as an element kind but nothing creates one. |
-| **Major** | **§24 — editor preferences are not persisted.** `users.preferences` exists and is read into `CurrentUser`; nothing writes it and the editor never reads it. |
+| **Minor** | **§24 — no context menu.** A named requirement; no `contextmenu` handler anywhere in `src/`. Copy/paste and group/ungroup were also missing when this report was first written and were both implemented during the review (⌘C/⌘X/⌘V, ⌘G/⇧⌘G). Group/ungroup is keyboard-only — no toolbar or layer-panel control. |
+| ~~Major~~ **CLOSED** | **§24 — editor preferences are now persisted.** `src/server/preferences.ts` reads them into the editor on load and writes them back debounced 800 ms. |
+| **Major** | **§9 — four of the five shipped font families are redistributed without their OFL copyright notice.** `src/assets/fonts/OFL.txt` names only Inter; Archivo, Barlow Condensed, Oswald and Bebas Neue are all OFL-1.1 upstream, but OFL-1.1 §1 requires each family's own notice to travel with it. A licence-compliance defect in what ships, not a functional one. |
+| **Major** | **§20 — the revision-supersede branch has never run.** Every design in the database sits at revision 1, so the code path that mints revision *n*+1 against a frozen revision — the mechanism the immutability guarantee rests on — has been verified only by reading it. |
 | **Major** | **§15 / §22 — output is not certified PDF/X, and is not claimed to be.** This is compliant behaviour under §15's fallback clause, not a defect — but it is the largest single gap between what exists and press-ready certification. |
 
 ---
@@ -111,7 +121,7 @@ supplied workbook.
 | Server-side PDF generation | **PASS** | `src/lib/pdf/production.ts`, pdf-lib |
 | Background job processing for batch | **PARTIAL** | `src/server/batch.ts` is a **slice-advancing job** driven by the client through `advanceBatchAction`, with state in `export_jobs` and resume-where-it-stopped semantics. It is not a queue with workers; nothing runs without a browser tab open. Reasoned in `docs/architecture.md` |
 | Playwright for E2E | **PASS** | `playwright.config.ts`, 3 tests |
-| Vitest | **PASS** | 465 passing |
+| Vitest | **PASS** | 474 passing across 12 files |
 | **Every major dependency has a recorded reason** | **PASS** | `docs/architecture.md` — Drizzle, the custom artboard, pdf-lib, µpt, the shared layout engine, exceljs and Vercel Blob at length; a table for the rest; plus a table of dependencies deliberately *not* added |
 
 **§3 — PASS.** (Background jobs is the one soft spot, and the spec's wording is
@@ -130,7 +140,7 @@ model list". All 28 tables in `src/server/db/schema.ts`.
 | All named entities modelled | **PASS** | the coverage table. One deliberate divergence: **DataFieldElement is not a separate element kind** — any text run or barcode may carry a `Binding`, which is more useful because a paragraph can mix literal and bound copy. Stated, not hidden |
 | One product, many packaging configurations and revisions | **PASS** | `card_designs.product_id` is many-to-one; `revisions` is many-to-one on design |
 | **Never just an opaque canvas JSON blob** | **PASS** | `revisions.doc` is a `DesignDocSchema`-validated structure with explicit µpt frames, `PrintColor`s and binding paths — not a Fabric/Konva serialisation. A document that fails `parse()` never reaches the database |
-| Normalised metadata to query, validate, migrate, regenerate | **PASS** | `design_elements`, re-projected by `projectElements()` in `src/server/designs.ts:130` on every save, in the same transaction. **24 rows** currently in the database. Indexed on `(org_id, barcode_value)` and on `asset_id`. Rationale and what it buys: `docs/data-model.md` |
+| Normalised metadata to query, validate, migrate, regenerate | **PASS** | `design_elements`, re-projected by `projectElements()` in `src/server/designs.ts:130` on every save, in the same transaction. **26 rows** at the last measurement. Indexed on `(org_id, barcode_value)` and on `asset_id`. Rationale and what it buys: `docs/data-model.md` |
 
 **§4 — PASS.**
 
@@ -168,7 +178,7 @@ BOM half of the requirement cannot be demonstrated because
 
 | Requirement | Verdict | Evidence |
 | --- | --- | --- |
-| left asset/data panel | **PARTIAL** | `src/components/editor/data-panel.tsx` — a searchable **data**-field browser over the 26-entry `FIELD_CATALOG`, with a Layers tab beside it. There is **no asset panel** |
+| left asset/data panel | **PARTIAL** | `src/components/editor/data-panel.tsx` — a searchable **data**-field browser over the 23-entry `FIELD_CATALOG`, with a Layers tab beside it. There is **no asset panel** |
 | centre artboard | **PASS** | `src/components/editor/artboard.tsx` |
 | right properties inspector | **PASS** | `src/components/editor/inspector.tsx` |
 | top toolbar | **PASS** | `src/components/editor/toolbar.tsx` |
@@ -200,10 +210,10 @@ BOM half of the requirement cannot be demonstrated because
 | keyboard nudging | **PASS** | arrows, shift for a coarse step, coalesced into one history entry |
 | shift-constrained transforms | **PASS** | "keeps the aspect ratio exactly when constrained" |
 | duplicate | **PASS** | ⌘D, offset 0.01 in |
-| **group / ungroup** | **FAIL** | `group` is a valid `ElementKind` in the schema and the plan resolves it, but **no UI action creates or dissolves one**. No keybinding, no toolbar control, no layer-panel action |
+| group / ungroup | **PASS** | `store.group()` / `store.ungroup()` in `src/lib/editor/store.ts`, bound to ⌘G and ⇧⌘G in `editor-shell.tsx`. A group is a flat element carrying child ids; the planner multiplies its opacity and hidden flag into its children. There is still **no toolbar or layer-panel control** — the keybinding is the only way in |
 | lock · hide | **PASS** | toolbar lock, per-layer eye/lock in `layers.tsx` |
 | reorder layers | **PASS** | layer panel; ⌘] / ⌘[ |
-| **copy / paste** | **FAIL** | no ⌘C / ⌘V handler in `src/components/editor/editor-shell.tsx`, no clipboard code anywhere in `src/` |
+| copy / paste | **PASS** | ⌘C / ⌘X / ⌘V in `editor-shell.tsx` over `src/lib/editor/clipboard.ts`, which writes validated design-document JSON on a private envelope to the system clipboard (so paste crosses tabs) and re-parses it with `DesignElementSchema` on the way in. An in-memory fallback covers a blocked clipboard. `tests/unit/clipboard.test.ts`, 5 tests |
 | undo/redo | **PASS** | as above |
 | contextual alignment indicators | **PASS** | snap guides render during drag |
 
@@ -215,8 +225,10 @@ BOM half of the requirement cannot be demonstrated because
 | inspector exposes X, Y, W, H, rotation, corner radius, opacity, stroke, fill | **PASS** | `inspector.tsx` — Geometry and Appearance sections |
 | every operation resolves to exact physical coordinates | **PASS** | integer µpt end to end; the UI renders µpt × zoom |
 
-**§6 — PARTIAL.** Group/ungroup and copy/paste are named requirements and are
-absent. Everything else is present and tested.
+**§6 — PARTIAL,** now only on the missing asset panel and the absent
+hardware-obstruction geometry. Group/ungroup and copy/paste were absent when this
+report was first written and were implemented during the review; both are
+verified above against the code that now exists.
 
 ---
 
@@ -228,7 +240,7 @@ absent. Everything else is present and tested.
 | Front: full colour, brand, product identification, marketing hierarchy, part number, product name, alternates, fitment, background art, product imagery | **PASS** | placed by `buildMasterTemplate()` in `src/lib/templates/factory.ts`; `MASTER_TEMPLATE_DESCRIPTION` enumerates them |
 | Back: B&W, identity, "This Pack Includes", alternates, fitment, genuine-parts statement, country of origin, barcode, warnings | **PASS** | same builder; 3 master templates in the database |
 | Editor allows intentional colour on the back when a template authorises it | **PASS** | "Allow authorised colour" toggle in the inspector; `tests/unit/preflight.test.ts` "flags colour ink on a grayscale back **and softens it when the template allows colour**" |
-| Standard back flags non-grayscale content | **PASS** | `GRAYSCALE_BACK_VIOLATION` in `src/lib/preflight/checks/color.ts` |
+| Standard back flags non-grayscale content | **PASS** | `GRAYSCALE_VIOLATION` in `src/lib/preflight/checks/color.ts` |
 | Independent layers per side, shared product data | **PASS** | `doc.front.elements` / `doc.back.elements` are independent; one `ProductContext` resolves both |
 
 **§7 — PASS.**
@@ -239,7 +251,7 @@ absent. Everything else is present and tested.
 
 | Requirement | Verdict | Evidence |
 | --- | --- | --- |
-| **Users must be able to upload a background to either card side** | **FAIL** | Upload works, but **only in `/settings/assets`**. `src/components/editor/inspector.tsx:527` gives an image element Fit, "Use as background" and focal controls — and **no asset picker**. No file in `src/components/editor/` writes `assetId` (grep: only `artboard-render.tsx` *reads* it). A designer can create an image element and can never fill it |
+| **Users must be able to upload a background to either card side** | **PASS** | `src/components/editor/asset-picker.tsx`, rendered by the image branch of `src/components/editor/inspector.tsx:558`. It lists the organisation's assets with their pixel size and colour space, filters by filename, **uploads a new file without leaving the card** (`uploadAssetAction`), and writes `assetId` through `store.updateElements`. The chain is real end to end: `/designs/[id]/edit/page.tsx` loads `assets` for the org → `EditorShell` → `Inspector` → `AssetPicker`. The inspector also prints effective DPI at the placed size beside the picker, colour-graded against the 300 dpi profile floor. **This was the report's blocker and it was closed during the review** |
 | PNG · JPEG · TIFF · SVG · PDF | **PARTIAL** | `sniff()` in `src/server/assets.ts` recognises PNG, JPEG, TIFF, WebP, SVG and PDF from magic bytes. The PDF **writer** accepts PNG and JPEG only and raises `ASSET_UNSUPPORTED` for the rest — "rejects an asset format it cannot place as vector-safe artwork". Honest, but TIFF/SVG/PDF artwork cannot reach a production PDF |
 | retain original file | **PASS** | stored in Blob; `sha256`, `byte_size`, `filename` recorded |
 | extract pixel dimensions | **PASS** | sharp, at upload; `pixel_width` / `pixel_height` |
@@ -247,11 +259,13 @@ absent. Everything else is present and tested.
 | calculate effective DPI at placed size | **PASS** | `src/lib/preflight/checks/assets.ts`; "grades resolution against the profile" |
 | warn below configurable thresholds | **PASS** | `ASSET_LOW_DPI`, `BLEED_LOW_DPI`; "warns rather than errors between the minimum and the floor" |
 | **never silently upscale and call it print-ready** | **PASS** | "never calls an upscale print-ready" |
-| Background controls: fill, fit, crop, position, scale, rotation, opacity, lock, replace | **PARTIAL** | fill/fit/stretch/crop, focal X/Y, rotation, opacity and lock all exist in the inspector. **Replace does not** — there is no picker to replace *with* |
+| Background controls: fill, fit, crop, position, scale, rotation, opacity, lock, replace | **PASS** | fill/fit/stretch/crop, focal X/Y, rotation, opacity and lock in the inspector; replace and clear are the picker's own controls |
 | Backgrounds extend through bleed when full-bleed | **PASS** | `isBackground` flag; `BLEED_COVERAGE` check — "flags a background that stops at the trim line", "does not flag a background that covers the whole bleed box" |
 
-**§8 — FAIL.** Every supporting capability is built and tested. The one control
-that makes the feature usable is missing. **This is the report's blocker.**
+**§8 — PARTIAL,** on placed-artwork formats alone: `sniff()` accepts PNG, JPEG,
+TIFF, WebP, SVG and PDF, but the PDF writer places only PNG and JPEG and raises
+`ASSET_UNSUPPORTED` for the rest, so TIFF, SVG and PDF artwork cannot reach a
+production file. Everything else in the section passes.
 
 ---
 
@@ -261,11 +275,13 @@ that makes the feature usable is missing. **This is the report's blocker.**
 | --- | --- | --- |
 | family, weight, size, tracking, line height, alignment, uppercase, box dimensions, vertical alignment, paragraph styles | **PASS** | `TextElementSchema` in `src/lib/design/schema.ts`; inspector Type section (Family, Case, Align, tracking, leading, vertical alignment) |
 | rich text only if deterministically exportable | **PASS** | modelled as `TextRun[]` per paragraph with explicit per-run overrides — no HTML, no contenteditable serialisation |
-| fonts legally available and embeddable | **PASS** | three families, **all SIL OFL-1.1**, shipped in `src/assets/fonts/` with `OFL.txt`. Only shipped fonts are selectable |
-| **never rely on browser-only font rendering** | **PASS** | `src/lib/text/layout.ts` measures from metrics generated from the same TTF bytes pdf-lib embeds. `tests/unit/pdf.test.ts` "does not apply OpenType shaping, so PDF advances match the layout engine" — verified for every ordered character pair in the metrics charset across all thirteen faces; and "sets a tracked span at exactly the x and baseline the plan computed" |
+| fonts legally available and embeddable | **PARTIAL** | **five** families / **19 faces** (Inter, Archivo, Barlow Condensed, Oswald, Bebas Neue), every one declared OFL-1.1 in `FONT_FAMILIES`, and only shipped fonts are selectable. But the single `src/assets/fonts/OFL.txt` carries **only the Inter copyright notice** — OFL-1.1 §1 requires each family's own notice to travel with it, so four families are redistributed without theirs. The licence permits what we do; the attribution file does not yet say so |
+| **never rely on browser-only font rendering** | **PASS** | `src/lib/text/layout.ts` measures from metrics generated from the same TTF bytes pdf-lib embeds; `tests/unit/pdf.test.ts` "sets a tracked span at exactly the x and baseline the plan computed" and "places every plan span at its own position, not a re-laid-out one". The shaping guard, stated accurately: "does not apply OpenType shaping…" sets **one** string (`off->staff`) in **one** face (Archivo 400) — it is not the every-pair-every-face sweep earlier drafts claimed. "every glyph in every embedded face matches the source outline" does iterate every shipped face over the whole metrics charset, but for advances and outlines, not shaping |
 | preflight errors for missing fonts | **PASS** | `FONT_MISSING` in both preflight and the exporter's notes; "reports a missing font family" |
 
-**§9 — PASS.**
+**§9 — PARTIAL,** on OFL attribution alone. Every functional requirement in
+the section passes; what is missing is the four copyright notices that OFL-1.1
+requires to be redistributed with the fonts.
 
 ---
 
@@ -323,7 +339,7 @@ that makes the feature usable is missing. **This is the report's blocker.**
 | human-readable digits | **PASS** | `HumanReadableRun`s with UPC-A's number-system and check digits placed outside the guard bars; "omits human-readable runs when they are switched off" |
 | configurable magnification within standards | **PASS** | 80 – 200 % (`MIN_/MAX_MAGNIFICATION_BPS`); out of range is **clamped and reported** |
 | **prevent arbitrary horizontal distortion** | **PASS** | "scales X strictly and never distorts width independently" — structural: there is no width parameter to abuse |
-| warn when physical size is outside specification | **PASS** | `BARCODE_SIZE`, `BARCODE_MAGNIFICATION`; "flags a symbol larger than its own frame", "flags truncated bar height" |
+| warn when physical size is outside specification | **PASS** | `BARCODE_SIZE` (which also carries the out-of-range and adjusted-magnification findings) and `BARCODE_TRUNCATED_HEIGHT`; "flags a symbol larger than its own frame", "flags truncated bar height" |
 | preflight contrast | **PASS** | `BARCODE_CONTRAST` — and it says plainly that the number is an **ink proxy**, not a measured optical density |
 | barcode colour is print-safe | **PASS** | bar colour is a `PrintColor`; the contrast check measures it against the quiet-zone fill |
 | **verification test suite with known inputs** | **PASS** | `tests/unit/barcode.test.ts`, **77 tests**, including a `describe("regressions found by adversarial review")` block of 10 |
@@ -351,10 +367,10 @@ Full detail in `docs/gs1-integration.md`.
 | request logging with secrets redacted | **PASS** | `gs1_request_logs`; `redact()` covers key names, free text, URLs, cycles, `__proto__`, and **registered literal secrets** |
 | retry / backoff | **PASS** | equal jitter, 3 attempts, 400 ms → 8 s; 5xx retried, 4xx not |
 | rate-limit handling | **PASS** | `Retry-After` honoured (both RFC 7231 forms) and **capped** so a hostile header cannot stall a batch |
-| sync status · last-synced timestamp · manual refresh | **PASS** | `gs1_sync_records.status` / `last_synced_at`; `verifyProductGtinAction` is the manual refresh; `recentGs1SyncsAction` shows history |
+| sync status · last-synced timestamp · manual refresh | **PASS** | `gs1_sync_records.status` / `last_synced_at` (both written by `verifyProductGtinAction`, which is the manual refresh); the last ten sync records are returned by `gs1SettingsViewAction()` and rendered on `/settings/gs1`. There is **no** `recentGs1SyncsAction` — earlier drafts cited one that was never written — and no per-product sync history |
 | conflict handling | **PASS** | `conflict` is an explicit diff status meaning "accepting would overwrite" |
 | do not scrape GS1 pages | **PASS** | REST only; no HTML parsing anywhere |
-| **works even if GS1 is not configured** | **PASS** | `createDisabledAdapter()` is the default and the fallback for every misconfiguration; `getAdapter()` has no null branch and no throw. The whole seeded system — 392 products, 3 exports — was built with **0 rows** in `gs1_connections` |
+| **works even if GS1 is not configured** | **PASS** | `createDisabledAdapter()` is the default and the fallback for every misconfiguration; `getAdapter()` has no null branch and no throw. the entire catalogue — 392 products, 3 exports — was built while `gs1_connections` was empty; the one connection row that exists now points at a local mock and changed no product data |
 | architect future GS1 Digital Link | **PASS** | URI build/parse complete and tested; **resolution is an optional interface method** guarded by a capability flag, deliberately unfilled — "has no optional digital-link resolution method (the extension point is unfilled by design)" |
 
 **§13 — PARTIAL,** on the unwired publish workflow alone.
@@ -503,7 +519,7 @@ conformance cannot be guaranteed** is done.
 | 7 | generate production PDFs | **PASS** | `renderProductionPdf()` per product, each validated after writing |
 | 8 | optionally package into ZIP | **FAIL** | not implemented. No zip dependency, no archive code. The spec marks it optional; it is absent |
 | 9 | create a manifest | **PASS** | `manifest` on `export_jobs`, plus `batchManifestCsvAction()` |
-| — | manifest fields: SKU, GTIN/UPC, preset, template, revision, filename, timestamp, preflight status | **PASS** | `src/server/batch.ts:47-57` carries exactly `sku`, `gtin`, `presetCode`, `template`, `revision`, `filename`, `exportedAt`, `preflight`, `status` |
+| — | manifest fields: SKU, GTIN/UPC, preset, template, revision, filename, timestamp, preflight status | **PASS** | `ManifestRow` in `src/server/batch.ts` carries all nine required fields — `sku`, `gtin`, `presetCode`, `template`, `revision`, `filename`, `exportedAt`, `preflight`, `status` — plus `index`, `productId`, `artifactId`, `validation` and `note` |
 | — | **a failed card must not silently disappear** | **PASS** | `status: "ok" \| "preflight_blocked" \| "invalid" \| "failed"` — a failure is a manifest row with a reason, written in the slice that attempted it, so a job that dies halfway still accounts for everything |
 
 **§19 — PARTIAL.** No ZIP (optional), no per-card preview, no in-batch retry.
@@ -524,10 +540,12 @@ conformance cannot be guaranteed** is done.
 | GS1 sync state | **PASS** | `revisions.gs1_sync_state` |
 | export history | **PASS** | `export_artifacts.revision_id`; `/exports` and `/exports/[id]` |
 | **approved revisions immutable** | **PASS** | enforced in `src/server/designs.ts` — a revision with `frozen_at` set is never written; a save against it mints revision *n*+1 and supersedes the old one. `rev_design_num_uq` makes a concurrent double-save fail rather than interleave. **Verified by reading the code; no automated test covers it** |
-| editing an approved card creates a new revision | **PASS** | same path. **10 revisions** exist on the seeded design |
+| editing an approved card creates a new revision | **PASS** | same path in `src/server/designs.ts`. The database currently holds 6 designs with 1 revision each, so **the multi-revision branch has not actually been exercised against the database** — only the single-revision path has. Verified by reading; no automated test |
 | **visual comparison between revisions where feasible** | **FAIL** | `/designs/[id]` lists every revision with number, status, notes, author, timestamp, frozen state and preflight summary. There is **no side-by-side or overlay comparison** of two revisions' artwork. The spec's "where feasible" softens this, but the artboard renderer is a pure function of a document — two of them side by side is feasible, and it was not built |
 
-**§20 — PARTIAL,** on visual comparison.
+**§20 — PARTIAL,** on visual comparison, and on the fact that the
+supersede-a-frozen-revision branch has never actually run — every design in the
+database is at revision 1, and no test drives the branch either.
 
 ---
 
@@ -550,13 +568,13 @@ conformance cannot be guaranteed** is done.
 | missing product fields | **PASS** | `PRODUCT_FIELD_MISSING` |
 | invalid UPC/GTIN | **PASS** | `GTIN_INVALID`, blocking, **naming the correct check digit** |
 | barcode quiet zone | **PASS** | `BARCODE_QUIET_ZONE`, measured from the bar band |
-| barcode physical dimensions | **PASS** | `BARCODE_SIZE`, `BARCODE_MAGNIFICATION` |
+| barcode physical dimensions | **PASS** | `BARCODE_SIZE`, `BARCODE_TRUNCATED_HEIGHT` |
 | barcode contrast | **PASS** | `BARCODE_CONTRAST` (ink proxy, said so) |
 | barcode clipping | **PASS** | `BARCODE_CLIPPED` |
 | cavity conflicts | **PASS** | cavity checks |
-| non-grayscale on standard back | **PASS** | `GRAYSCALE_BACK_VIOLATION` |
+| non-grayscale on standard back | **PASS** | `GRAYSCALE_VIOLATION` |
 | transparency/export concerns | **PASS** | `TRANSPARENCY_PRESENT` |
-| total ink limit if measurable | **PASS** | `INK_LIMIT_EXCEEDED` |
+| total ink limit if measurable | **PASS** | `INK_LIMIT` |
 | empty front/back | **PASS** | `DOC_EMPTY_SIDE` — error on the front, warning on the back |
 | hidden required elements | **PASS** | "blocks when a required element is switched off, and errors when data hid it" |
 | **blocking errors require a privileged override with an audit note, or are blocked entirely by configuration** | **PASS** | `src/server/exports.ts:134-160` — the org's `allowOverride` decides; when permitted, an empty note is refused, `requireCapability("export.override_blocking")` gates it (admin only), and the note is written to the job **and** the audit log. `export-panel.tsx:134` tells a non-admin why they cannot. **Verified by reading the code; no automated test covers it** |
@@ -578,7 +596,7 @@ conformance cannot be guaranteed** is done.
 | barcode presence | **PASS** | `BARCODE_PRESENCE`, by decoded digits **and** by independent bar count |
 | no editor overlays | **PASS** | `NO_EDITOR_OVERLAYS`, one failure test per overlay word |
 | no accidental clipping | **PASS** | `NO_CLIPPING` |
-| **render the exported PDF to images and compare against the editor reference/proof** | **PARTIAL** | The PDFs were rendered — `artifacts/review/` holds page-by-page PNGs for all six files, `artifacts/renders/` holds the 11-500 benchmark — and were **reviewed by eye**. There is **no automated render-and-compare**: no baseline, no perceptual diff, nothing that would fail on a regression |
+| **render the exported PDF to images and compare against the editor reference/proof** | **PARTIAL** | The PDFs were rendered — `artifacts/pdf/png/` holds 14 page-by-page PNGs, `artifacts/renders/` holds 8 more of the 11-500 benchmark — and were **reviewed by eye**. (There is no `artifacts/review/` directory of PNGs; earlier drafts named one.) There is **no automated render-and-compare**: no baseline, no perceptual diff, nothing that would fail on a regression |
 | **automated geometry tests for all three presets** | **PASS** | `tests/unit/geometry.test.ts` at the preset level (exact integers) and `tests/unit/pdf-validate.test.ts` at the file level (±0.001 pt) |
 | **tolerance appropriate for PDF point conversion, documented** | **PASS** | `BOX_TOLERANCE_PT = 0.001` (= 1/72000 in = 0.35 µm) with a paragraph of reasoning: the writer's own precision is 5 × 10⁻⁷ pt, so the tolerance is 3 orders looser than needed and 70× tighter than the smallest real error. `CLIP_TOLERANCE_PT = 0.25` is separately justified by the em-box and stroke-centreline approximations. Both are printed in the report next to the measurement |
 
@@ -591,7 +609,7 @@ conformance cannot be guaranteed** is done.
 | Requirement | Verdict | Evidence |
 | --- | --- | --- |
 | Use `11-500 front.pdf` and `11-500 back.pdf` as a benchmark | **FAIL** | **Neither file was supplied.** `docs/source-audit.md` §1 |
-| Front: brand/logo, part number, product title, subtitle/spec, multilingual copy, alternate part number, background/brand graphic, fitment footer, full colour | **PARTIAL** | all placed by `buildMasterTemplate()` and bound to product data; rendered at `artifacts/renders/11-500-409TF-production-p0.png`. **Not compared with the sample, because there is no sample.** The product-image element is present but **cannot be given an asset** (§8) |
+| Front: brand/logo, part number, product title, subtitle/spec, multilingual copy, alternate part number, background/brand graphic, fitment footer, full colour | **PARTIAL** | all placed by `buildMasterTemplate()` and bound to product data; rendered at `artifacts/renders/11-500-409TF-production-p0.png`. **Not compared with the sample, because there is no sample.** The product-image element is present and can now be given an asset from the inspector (§8) |
 | Back: logo, part number, title/spec, multilingual copy, "This Pack Includes", alternates, fitment, genuine-parts section, country of origin, barcode, warning footer, B&W | **PARTIAL** | all placed and bound; `scripts/seed-benchmark.ts` supplies the 11-500 product data (5 BOM items, 2 fitments, 4 alternates, 1 Prop 65 warning, `Made in China`, 4 translations), every row tagged `custom.benchmarkSource`. Rendered at `artifacts/renders/11-500-409TF-production-p1.png` |
 | Prove the system can represent and output the same **classes** of production content | **PASS** | every class in §23's two lists is a bound element in a shipped template, exported to a validated production PDF |
 
@@ -618,11 +636,13 @@ and the fitment copy — are assumptions awaiting client confirmation
 | object lock · layers | **PASS** | toolbar and layer panel |
 | **context menu** | **FAIL** | no `contextmenu` handler anywhere in `src/` |
 | duplicate | **PASS** | ⌘D |
-| **copy / paste** | **FAIL** | no ⌘C/⌘V handler; no clipboard code |
+| copy / paste | **PASS** | ⌘C / ⌘X / ⌘V over `src/lib/editor/clipboard.ts`; cross-tab, schema-validated on paste, with an in-memory fallback. 5 tests |
 | clear unsaved/export states | **PASS** | save state in the header; export state in `export-panel.tsx` |
-| **persist editor preferences per user** | **FAIL** | `users.preferences` exists as a column and is loaded into `CurrentUser` — **nothing writes it and the editor never reads it.** Unit, zoom, overlay toggles and snap state reset on every page load |
+| persist editor preferences per user | **PASS** | `src/server/preferences.ts` — `readEditorPreferences()` is called by `/designs/[id]/edit` and seeds the store; `saveEditorPreferencesAction()` is called from `editor-shell.tsx` debounced 800 ms whenever unit, snap, overlays or the left tab change, and writes `users.preferences.editor`. Zoom and pan are deliberately not persisted |
 
-**§24 — PARTIAL.** Three named requirements missing.
+**§24 — PARTIAL,** on the context menu alone. Copy/paste and per-user editor
+preferences were both absent when this report was first written and were
+implemented during the review.
 
 ---
 
@@ -696,9 +716,9 @@ not by tooling.
 | corner radius represented | **PASS** | one shared path function |
 | cavity overlays exist | **PASS** | measured, provenance-marked |
 | front/back editor works | **PASS** | — |
-| full-colour front workflow works | **PARTIAL** | **no product image can be placed** (§8) |
+| full-colour front workflow works | **PASS** | an image element can now be given an asset from the inspector's picker (§8) |
 | black-and-white back workflow works | **PASS** | grayscale enforcement with an authorised-colour escape |
-| **backgrounds upload and position correctly** | **FAIL** | upload works in the asset library; **an image element cannot be given an asset from the editor** (§8) |
+| **backgrounds upload and position correctly** | **PASS** | upload from the asset library **or from inside the editor**; placed through `AssetPicker`; positioned with fit/focal/rotation/opacity; `BLEED_COVERAGE` checks that a background actually covers the bleed box (§8) |
 | text editing works | **PASS** | — |
 | layers work | **PASS** | — |
 | snapping/guides work | **PASS** | — |
@@ -711,41 +731,51 @@ not by tooling.
 | GS1 configurable without exposing credentials | **PASS** | write-only, encrypted, AAD-bound |
 | CMYK preserved as print data | **PASS** | no RGB in the print path |
 | screen RGB honestly treated as preview | **PASS** | named as an approximation everywhere |
-| production PDF export works | **PASS** | 6 sample PDFs in `artifacts/pdf/` |
+| production PDF export works | **PASS** | 6 sample PDFs in `artifacts/pdf/`, and 3 real `export_artifacts` rows. One of those rows is recorded `status: "invalid"` — an earlier run of the benchmark card failed its own `COLOR_SPACES` check because a placed **DeviceRGB** raster reached the file; a later run of the same card passed. That is the documented pdf-lib limitation (§14 row 5) behaving as designed: the file was stored as produced-and-rejected rather than quietly shipped |
 | bleed/trim boxes validated | **PASS** | ±0.001 pt |
 | fonts embedded/subset | **PASS** | every glyph re-extracted and compared |
 | low-DPI artwork detected | **PASS** | — |
 | unresolved data detected | **PASS** | — |
 | preflight works | **PASS** | 73 tests |
 | batch generation works | **PASS** | manifest with per-row reasons |
-| revisions work | **PASS** | 10 revisions on the seeded design |
-| approvals work | **PASS** | `approvals` table + controls. **Untested** |
-| approved artwork immutable | **PASS** | enforced in one code path. **Untested** |
+| revisions work | **PARTIAL** | the revision model, the status vocabulary and the freeze rule are all implemented in `src/server/designs.ts`, but every design in the database sits at revision 1 — the supersede-on-save-after-approval branch has never been run, and no test covers it |
+| approvals work | **PARTIAL** | `approvals` table + controls exist; the table holds **0 rows**, so no approval has ever been recorded, and no test covers the path |
+| approved artwork immutable | **PARTIAL** | enforced in one code path (`src/server/designs.ts`). **No test covers it, and the branch has never run** — every design is at revision 1 |
 | **sample 11-500 content structure can be reproduced** | **PARTIAL** | structure yes; **comparison impossible — the sample was never supplied** |
-| **tests pass** | **PASS** | 465 passed, 1 opt-in skipped |
+| **tests pass** | **PASS** | 474 passed, 1 opt-in skipped, across 12 files |
 | **build passes** | **PARTIAL** | `npx tsc --noEmit` is **clean**. `next build` was **not run for this report** |
 | **E2E passes** | **PARTIAL** | 3 auth tests. The editor, import, export, approval and batch flows have **no E2E coverage** |
-| exported PDFs rendered and visually inspected | **PASS** | `artifacts/review/`, `artifacts/renders/`, reviewed by eye |
-| **final gauntlet report has no unresolved blocker/critical/major findings** | **NOT MET** | 1 blocker, 2 critical, 4 major — listed at the top |
+| exported PDFs rendered and visually inspected | **PASS** | `artifacts/pdf/png/` (14 images), `artifacts/renders/` (8), reviewed by eye |
+| **final gauntlet report has no unresolved blocker/critical/major findings** | **NOT MET** | 0 blockers (the §8 blocker was closed during this review), 2 critical, 5 major — listed at the top |
 
 ## §30 verdict: NOT MET
 
 The system is substantially complete and, in the areas that decide whether a
 card can be printed — geometry, colour, fonts, barcodes, preflight, PDF
-structure — it is thoroughly built and thoroughly tested. 465 tests pass and the
-typecheck is clean.
+structure — it is thoroughly built and thoroughly tested. 474 tests pass and the
+typecheck is clean. The blocker this report carried in its first revision — a
+designer being unable to place an image — was closed while the report was being
+checked, along with copy/paste, group/ungroup and per-user editor preferences.
 
-It is **not done** for four reasons, in order:
+It is **not done** for five reasons, in order:
 
-1. **A designer cannot place an image.** §8's central control is missing from
-   the inspector. Every layer beneath it works.
-2. **The §23 benchmark has never been compared with the sample,** because the
-   sample was never supplied.
-3. **`src/server/*` has no automated tests** — including revision immutability,
+1. **The §23 benchmark has never been compared with the sample,** because
+   `11-500 front.pdf` and `11-500 back.pdf` were never supplied. The milestone is
+   named for a comparison that cannot happen.
+2. **`src/server/*` has no automated tests** — including revision immutability,
    organisation isolation, RBAC and the blocking-export override, which are the
    paths where a failure is most expensive.
-4. **Three named §24 editor requirements are absent:** copy/paste,
-   group/ungroup, and per-user editor preferences.
+3. **The revision-supersede branch has never executed.** Every design in the
+   database is at revision 1 and `approvals` holds 0 rows, so §20's immutability
+   guarantee — and the approval workflow it hangs on — are verified by reading
+   the code and by nothing else.
+4. **§5's BOM ingestion is proven only against synthetic fixtures,** because the
+   multi-sheet workbook was never supplied.
+5. **Four of the five shipped font families carry no OFL copyright notice.** A
+   redistribution-compliance defect in what ships.
+
+Two smaller gaps remain named requirements: §13B's publish path is implemented at
+the adapter layer and wired to nothing, and §24's context menu does not exist.
 
 Everything else on this list is either PASS with evidence, or PARTIAL for a
 reason stated in the row.

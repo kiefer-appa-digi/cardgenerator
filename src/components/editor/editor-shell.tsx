@@ -9,6 +9,8 @@ import { BrandLogo } from "@/components/brand-logo";
 import { EditorStore, useEditorSelector } from "@/lib/editor/store";
 import { NUDGE_SHIFT_UPT, NUDGE_UPT } from "@/lib/editor/interaction";
 import { planSide, type AssetInfo } from "@/lib/design/plan";
+import { readElements, rekeyForPaste, writeElements } from "@/lib/editor/clipboard";
+import { saveEditorPreferencesAction, type EditorPreferences } from "@/server/preferences";
 import type { DesignDoc, DesignElement } from "@/lib/design/schema";
 import {
   BarcodeElementSchema, BomListElementSchema, ImageElementSchema,
@@ -43,6 +45,7 @@ export function EditorShell({
   revisionNumber,
   canWrite,
   canSubmit,
+  preferences,
 }: {
   designId: string;
   designName: string;
@@ -54,9 +57,19 @@ export function EditorShell({
   revisionNumber: number;
   canWrite: boolean;
   canSubmit: boolean;
+  preferences: EditorPreferences;
 }) {
   const storeRef = useRef<EditorStore>(null);
-  if (!storeRef.current) storeRef.current = new EditorStore(initialDoc);
+  if (!storeRef.current) {
+    storeRef.current = new EditorStore(initialDoc, preferences.unit);
+    // Applied at construction rather than in an effect so the first paint is
+    // already the designer's own view state, with no visible flip.
+    storeRef.current.set({
+      snap: preferences.snap,
+      snapToleranceUpt: preferences.snapToleranceUpt,
+      overlays: preferences.overlays,
+    });
+  }
   const store = storeRef.current;
 
   const doc = useEditorSelector(store, (s) => s.doc);
@@ -67,10 +80,11 @@ export function EditorShell({
   const editingTextId = useEditorSelector(store, (s) => s.editingTextId);
   const tool = useEditorSelector(store, (s) => s.tool);
 
-  const [leftTab, setLeftTab] = useState<"data" | "layers">("data");
+  const [leftTab, setLeftTab] = useState<"data" | "layers">(preferences.leftTab);
   const [report, setReport] = useState<PreflightReport | null>(null);
   const [checking, setChecking] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [pasteNote, setPasteNote] = useState<string | null>(null);
   // Uploading from inside the editor has to add to this list immediately;
   // otherwise the asset the designer just chose renders as a missing placeholder
   // until the next full page load.
@@ -131,6 +145,30 @@ export function EditorShell({
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [store]);
 
+  /* ---------------------------------------------------- preferences */
+
+  const unit = useEditorSelector(store, (s) => s.unit);
+  const snap = useEditorSelector(store, (s) => s.snap);
+  const overlays = useEditorSelector(store, (s) => s.overlays);
+  const firstPrefRun = useRef(true);
+
+  useEffect(() => {
+    if (firstPrefRun.current) {
+      firstPrefRun.current = false;
+      return;
+    }
+    const t = setTimeout(() => {
+      void saveEditorPreferencesAction({
+        unit,
+        snap,
+        snapToleranceUpt: store.getState().snapToleranceUpt,
+        overlays,
+        leftTab,
+      });
+    }, 800);
+    return () => clearTimeout(t);
+  }, [unit, snap, overlays, leftTab, store]);
+
   /* ------------------------------------------------------------ preflight */
 
   const runPreflight = useCallback(async () => {
@@ -153,6 +191,40 @@ export function EditorShell({
     const t = setTimeout(() => void runPreflight(), 1500);
     return () => clearTimeout(t);
   }, [doc, runPreflight]);
+
+  const copySelection = useCallback(
+    async (cut: boolean) => {
+      const st = store.getState();
+      const els = store.resolveSelection(st.selection);
+      if (els.length === 0) return;
+      await writeElements(els, st.doc.presetCode, st.side);
+      if (cut) store.removeElements(els.map((e) => e.id));
+    },
+    [store],
+  );
+
+  const pasteClipboard = useCallback(async () => {
+    const payload = await readElements();
+    if (!payload || payload.elements.length === 0) return;
+    // Pasting across presets is allowed but says so: a 409TF layout dropped on a
+    // 206TF will need moving, and silently refusing is more annoying than a note.
+    const st = store.getState();
+    if (payload.presetCode !== st.doc.presetCode) {
+      setPasteNote(
+        `Pasted from a ${payload.presetCode} card onto a ${st.doc.presetCode} card — check the positions.`,
+      );
+    } else {
+      setPasteNote(null);
+    }
+    const offset = 720_000; // 0.01 in, so the paste is visibly its own object
+    const pasted = rekeyForPaste(payload.elements, offset, () => nanoid(12));
+    const side = st.side;
+    store.commit((d) => ({
+      ...d,
+      [side]: { ...d[side], elements: [...d[side].elements, ...pasted] },
+    }));
+    store.select(pasted.filter((e) => !e.groupId).map((e) => e.id));
+  }, [store]);
 
   /* ------------------------------------------------------- keyboard */
 
@@ -186,6 +258,27 @@ export function EditorShell({
       if (meta && e.key.toLowerCase() === "d") {
         e.preventDefault();
         duplicateSelection();
+        return;
+      }
+      if (meta && e.key.toLowerCase() === "c") {
+        e.preventDefault();
+        void copySelection(false);
+        return;
+      }
+      if (meta && e.key.toLowerCase() === "x") {
+        e.preventDefault();
+        void copySelection(true);
+        return;
+      }
+      if (meta && e.key.toLowerCase() === "v") {
+        e.preventDefault();
+        void pasteClipboard();
+        return;
+      }
+      if (meta && e.key.toLowerCase() === "g") {
+        e.preventDefault();
+        if (e.shiftKey) store.ungroup(store.getState().selection);
+        else store.group(store.getState().selection);
         return;
       }
       if (meta && e.key.toLowerCase() === "a") {
@@ -232,7 +325,7 @@ export function EditorShell({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store, save]);
+  }, [store, save, copySelection, pasteClipboard]);
 
   const duplicateSelection = useCallback(() => {
     const sel = store.selectedElements();
@@ -356,6 +449,16 @@ export function EditorShell({
 
         <div className="flex-1" />
 
+        {pasteNote ? (
+          <button
+            type="button"
+            onClick={() => setPasteNote(null)}
+            className="max-w-md truncate rounded border border-amber-800/60 bg-amber-500/10 px-2 py-1 text-[11px] text-sev-warning"
+            title={pasteNote}
+          >
+            {pasteNote}
+          </button>
+        ) : null}
         <span
           className={cn(
             "text-[11px]",

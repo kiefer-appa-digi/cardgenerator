@@ -435,8 +435,10 @@ before commit), and `report` (§5.10's post-commit report).
 `rows_total` / `rows_created` / `rows_updated` / `rows_skipped` are columns
 because they are what the imports list shows.
 
-The current row for the supplied workbook reads: 393 total, 392 created, 0
-updated, 1 skipped.
+The first commit of the supplied workbook reads 393 total, 392 created, 0
+updated, 1 skipped. Two further committed rows for the same file exist from
+exercising the re-import path (392 updated, then 1 updated); see
+`docs/source-audit.md` §5.
 
 Provenance flows outward from here: `products.source_import_id` points back, and
 `products.source_row` holds that product's entire spreadsheet row verbatim. §5.12

@@ -12,6 +12,7 @@ import {
   buildBlankTemplate,
   buildMasterTemplate,
 } from "@/lib/templates/factory";
+import { AXLETEK_TEMPLATE_DESCRIPTION, buildAxleTekTemplate } from "@/lib/templates/axletek";
 import { PRESET_CODES, type CardPresetDef } from "@/lib/geometry/presets";
 
 /**
@@ -22,27 +23,34 @@ export async function ensureMasterTemplatesAction() {
   const user = await requireCapability("template.write");
   const created: string[] = [];
 
-  for (const code of PRESET_CODES) {
-    const name = `${code} — 11-500 master`;
-    const [existing] = await db
-      .select()
-      .from(cardTemplates)
-      .where(and(eq(cardTemplates.orgId, user.orgId), eq(cardTemplates.name, name)))
-      .limit(1);
-    if (existing) continue;
+  const families = [
+    { suffix: "11-500 master", description: MASTER_TEMPLATE_DESCRIPTION, build: buildMasterTemplate },
+    { suffix: "AxleTek layout", description: AXLETEK_TEMPLATE_DESCRIPTION, build: buildAxleTekTemplate },
+  ];
 
-    await db.insert(cardTemplates).values({
-      id: nanoid(24),
-      orgId: user.orgId,
-      presetCode: code,
-      name,
-      description: MASTER_TEMPLATE_DESCRIPTION,
-      doc: buildMasterTemplate(code),
-      isMaster: true,
-      createdBy: user.id,
-      updatedAt: new Date(),
-    });
-    created.push(name);
+  for (const code of PRESET_CODES) {
+    for (const fam of families) {
+      const name = `${code} — ${fam.suffix}`;
+      const [existing] = await db
+        .select()
+        .from(cardTemplates)
+        .where(and(eq(cardTemplates.orgId, user.orgId), eq(cardTemplates.name, name)))
+        .limit(1);
+      if (existing) continue;
+
+      await db.insert(cardTemplates).values({
+        id: nanoid(24),
+        orgId: user.orgId,
+        presetCode: code,
+        name,
+        description: fam.description,
+        doc: fam.build(code),
+        isMaster: true,
+        createdBy: user.id,
+        updatedAt: new Date(),
+      });
+      created.push(name);
+    }
   }
 
   if (created.length) {

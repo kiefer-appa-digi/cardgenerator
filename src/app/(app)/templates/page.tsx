@@ -138,7 +138,9 @@ export default async function TemplatesPage() {
                         <div className="flex items-center gap-2">
                           <Link
                             href={`/templates/${t.id}`}
-                            className="font-medium text-ink-100 hover:text-brand-300"
+                            // A template name carries the SKU it was built for;
+                            // breaking it mid-token ("11- 500") misreads.
+                            className="whitespace-nowrap font-medium text-ink-100 hover:text-brand-300"
                           >
                             {t.name}
                           </Link>

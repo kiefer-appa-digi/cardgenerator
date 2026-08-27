@@ -31,13 +31,19 @@ const WANTED = [
   // and preflight says so, so the seed produces a file that passes rather than a
   // file that merely looks right.
   { file: "full-black.png", role: "back" as const, grayscale: true, cmyk: false },
+  // Reversed mark for artwork that sits on a dark band. It stays a PNG with its
+  // alpha channel intact: flattening it would put a white box on the black, and
+  // a CMYK JPEG cannot carry transparency at all. That costs a DeviceRGB image
+  // in the export, which preflight reports honestly — the fix is a reversed mark
+  // supplied as CMYK or spot artwork, which the brand has not provided.
+  { file: "full-white.png", role: "reversed" as const, grayscale: false, cmyk: false },
 ];
 
 async function main() {
   const [org] = await db.select().from(organizations).limit(1);
   if (!org) throw new Error("No organisation. Run `npm run db:seed` first.");
 
-  const ids: Record<"front" | "back", string> = { front: "", back: "" };
+  const ids: Record<"front" | "back" | "reversed", string> = { front: "", back: "", reversed: "" };
 
   for (const w of WANTED) {
     const p = path.join(BRAND_DIR, w.file);
@@ -136,8 +142,12 @@ async function main() {
         ...doc[side],
         elements: doc[side].elements.map((el) => {
           if (el.kind !== "image") return el;
-          if (!/logo/i.test(el.id) && !/logo/i.test(el.name)) return el;
-          const want = side === "front" ? ids.front : ids.back;
+          const isLogo = /logo|mark/i.test(el.id) || /logo|mark/i.test(el.name);
+          if (!isLogo) return el;
+          // A slot whose name says "reversed" needs the white mark whichever
+          // side it is on; otherwise the front takes colour and the back mono.
+          const reversed = /revers/i.test(el.name) || /revers/i.test(el.id);
+          const want = reversed ? ids.reversed : side === "front" ? ids.front : ids.back;
           if (!want || el.assetId === want) return el;
           changed = true;
           return { ...el, assetId: want };

@@ -257,9 +257,11 @@ Fill rate is the count of non-empty cells over the 393 data rows.
 | 40 | AN | Target Markets | text | 89 | 22.6 % | 1 | 2 | always `US` when present |
 | 41 | AO | Last Modified Date | text | 393 | 100.0 % | 48 | 10 | `2017-10-27` … `2026-08-10` |
 
-**22 of 41 columns (54 %) are empty in every row.** The inspection reports each
-one as a `COLUMN_ENTIRELY_EMPTY` note rather than dropping it, because a column
-that exists and is empty is a fact about the export.
+**23 of 41 columns (56 %) are empty in every row** — C, E, O, P, Q, R, S, T, U,
+W, X, Y, AB, AC, AD, AE, AF, AG, AH, AI, AK, AL and AM. `inspectWorkbook()`
+emits exactly 23 `COLUMN_ENTIRELY_EMPTY` notes, one per column, rather than
+dropping them, because a column that exists and is empty is a fact about the
+export.
 
 ### Value distributions
 
@@ -318,8 +320,16 @@ What the workbook *does* establish about product structure:
 
 ### Import outcome, as actually committed
 
-`imports` table, one row: `ExportAllProducts_20260826220203076.xlsx`,
-status `committed`, **393 rows total → 392 created, 0 updated, 1 skipped**.
+The **first** commit of `ExportAllProducts_20260826220203076.xlsx` reads
+**393 rows total → 392 created, 0 updated, 1 skipped**. That is the number this
+document's catalogue figures are derived from.
+
+The `imports` table now holds **three** committed rows for the same file,
+because the re-import path was exercised against it afterwards: the second run
+reads 393 → 0 created, 392 updated, 1 skipped, and the third 393 → 0 created,
+1 updated, 1 skipped. The row counts below are unchanged by those runs, which is
+the point of §5.12 — a re-import of an unchanged file updates rather than
+duplicates.
 
 The skipped row is **row 4**: no GTIN, no UPC, no SKU, `Product Description`
 is the bare string `H-150-09`. It cannot be identified by any key, so it was
@@ -463,12 +473,14 @@ contains an internal code, not a description. Row 4 was the skipped row; 44 and
 46 imported with `recordType: non_sellable` (the 2 non-sellable products in the
 database) because a bare internal code is not a sellable product name.
 
-### D14 — 22 empty columns including every dimension and weight
+### D14 — 23 empty columns including every dimension and weight
 
-Height, Width, Depth, Dimension Measure, Gross Weight, Net Weight, Weight
-Measure, Sub-brand, Description-Short, Label Description, Net Content 2 & 3,
-Brand 2, Description 2, GPC Attribute, Image URL, Image URL Validation, GTIN-8,
-GTIN-13. Anything a card needs from these has to come from elsewhere.
+GTIN-8, GTIN-13, Height, Width, Depth, Dimension Measure, Gross Weight, Net
+Weight, Weight Measure, Sub-brand Name, Product Description-Short, Label
+Description, Net Content 2 Count, Net Content 2 Unit of Measure, Net Content 3
+Count, Net Content 3 Unit of Measure, Brand Name 2, Brand 2 Language,
+Description 2, Desc 2 Language, GPC Attribute, Image URL, Image URL Validation.
+Anything a card needs from these has to come from elsewhere.
 
 ### D15 — `Target Markets` blank on 272 of 361 In-Use rows
 

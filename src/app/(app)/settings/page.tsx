@@ -55,7 +55,13 @@ export default async function SettingsPage() {
       description: "Black rules, preflight thresholds and the export policy.",
       state: <Badge tone="brand">{settings.profile.name}</Badge>,
       facts: [
-        ["Ink limit", `${(Math.min(settings.blackRules.totalAreaCoverageLimit, settings.profile.inkLimit) / 10).toFixed(0)} %`],
+        // One decimal, matching the organisation screen and the stored tenths of
+        // a percent. Rounding 285.5 % to "286 %" here would state an ink limit
+        // the press was never set to.
+        [
+          "Ink limit",
+          `${(Math.min(settings.blackRules.totalAreaCoverageLimit, settings.profile.inkLimit) / 10).toFixed(1)} %`,
+        ],
         ["Minimum image DPI", String(settings.profile.minImageDpi)],
         [
           "Rich-black text floor",

@@ -167,19 +167,30 @@ export type LayoutOptions = {
   autoFit?: { mode: "none" | "shrink"; minFontSize: Upt };
 };
 
-type Token = { text: string; isSpace: boolean; run: ResolvedRun };
+type Token = { text: string; isSpace: boolean; isBreak: boolean; run: ResolvedRun };
 
 function tokenise(runs: ResolvedRun[], transform: TextTransform): Token[] {
   const out: Token[] = [];
   for (const run of runs) {
     const text = applyTransform(run.text, transform);
     if (!text) continue;
-    // Split into runs of whitespace and runs of non-whitespace, keeping both.
-    const parts = text.split(/(\s+)/);
-    for (const p of parts) {
-      if (!p) continue;
-      out.push({ text: p, isSpace: /^\s+$/.test(p), run });
+    // A newline inside a run is a HARD break, not whitespace to wrap on. A
+    // binding joined with "\n" — a fitment list, a pack-contents block, an
+    // address — has to break where it says it breaks, or the lines run together
+    // and the copy reads as one sentence.
+    for (const segment of text.split(/\r\n|\r|\n/)) {
+      if (segment) {
+        // Split into runs of whitespace and runs of non-whitespace, keeping both.
+        for (const p of segment.split(/(\s+)/)) {
+          if (!p) continue;
+          out.push({ text: p, isSpace: /^\s+$/.test(p), isBreak: false, run });
+        }
+      }
+      out.push({ text: "", isSpace: false, isBreak: true, run });
     }
+    // The split above appends a break after the last segment too; drop it, since
+    // a run ending without a newline must not force one.
+    if (out.length && out[out.length - 1].isBreak) out.pop();
   }
   return out;
 }
@@ -297,6 +308,15 @@ function layoutOnce(
     };
 
     for (const token of tokens) {
+      if (token.isBreak) {
+        // Force a line even when the current line is empty, so a blank line in
+        // the source is a blank line on the card.
+        if (current.length === 0) {
+          current.push({ text: "", isSpace: false, isBreak: false, run: token.run });
+        }
+        flush(true);
+        continue;
+      }
       const fm = getFaceMetrics(token.run.fontFamily, token.run.fontWeight, token.run.italic);
       const w = Math.round(measureString(token.text, fm.metrics, token.run.fontSize, token.run.tracking));
 
@@ -316,7 +336,7 @@ function layoutOnce(
           for (const ch of token.text) {
             const cw = Math.round(measureString(ch, fm.metrics, token.run.fontSize, token.run.tracking));
             if (bufW + cw > opts.maxWidth && buf) {
-              current.push({ text: buf, isSpace: false, run: token.run });
+              current.push({ text: buf, isSpace: false, isBreak: false, run: token.run });
               hardBroken = true;
               flush(true);
               buf = "";
@@ -326,7 +346,7 @@ function layoutOnce(
             bufW += cw;
           }
           if (buf) {
-            current.push({ text: buf, isSpace: false, run: token.run });
+            current.push({ text: buf, isSpace: false, isBreak: false, run: token.run });
             currentWidth = bufW;
           }
           continue;

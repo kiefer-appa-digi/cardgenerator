@@ -7,14 +7,28 @@ import { nanoid } from "nanoid";
 import { db } from "../src/server/db/client";
 import { cardTemplates, organizations } from "../src/server/db/schema";
 import { MASTER_TEMPLATE_DESCRIPTION, buildMasterTemplate } from "../src/lib/templates/factory";
+import { AXLETEK_TEMPLATE_DESCRIPTION, buildAxleTekTemplate } from "../src/lib/templates/axletek";
 import { PRESET_CODES } from "../src/lib/geometry/presets";
 
 async function main() {
   const [org] = await db.select().from(organizations).limit(1);
   if (!org) throw new Error("No organisation. Run `npm run db:seed` first.");
 
-  for (const code of PRESET_CODES) {
-    const name = `${code} — 11-500 master`;
+  const families = [
+    {
+      suffix: "11-500 master",
+      description: MASTER_TEMPLATE_DESCRIPTION,
+      build: buildMasterTemplate,
+    },
+    {
+      suffix: "AxleTek layout",
+      description: AXLETEK_TEMPLATE_DESCRIPTION,
+      build: buildAxleTekTemplate,
+    },
+  ];
+
+  for (const code of PRESET_CODES) for (const fam of families) {
+    const name = `${code} — ${fam.suffix}`;
     const [existing] = await db
       .select()
       .from(cardTemplates)
@@ -29,8 +43,8 @@ async function main() {
       orgId: org.id,
       presetCode: code,
       name,
-      description: MASTER_TEMPLATE_DESCRIPTION,
-      doc: buildMasterTemplate(code),
+      description: fam.description,
+      doc: fam.build(code),
       isMaster: true,
       updatedAt: new Date(),
     });

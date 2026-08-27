@@ -6,6 +6,7 @@ import { assets as assetsTable, cardDesigns, db, revisions } from "@/server/db";
 import { buildProductContext, sampleProductContext } from "@/server/products";
 import { DesignDocSchema } from "@/lib/design/schema";
 import { EditorShell } from "@/components/editor/editor-shell";
+import { readEditorPreferences } from "@/server/preferences";
 
 export const dynamic = "force-dynamic";
 
@@ -32,6 +33,8 @@ export default async function EditPage({ params }: PageProps<"/designs/[id]/edit
   const product = design.productId
     ? ((await buildProductContext(user.orgId, design.productId)) ?? sampleProductContext())
     : sampleProductContext();
+
+  const preferences = await readEditorPreferences();
 
   const orgAssets = await db
     .select()
@@ -64,6 +67,7 @@ export default async function EditPage({ params }: PageProps<"/designs/[id]/edit
       revisionNumber={rev.revisionNumber}
       canWrite={can(user.role, "design.write") && !rev.frozenAt}
       canSubmit={can(user.role, "design.submit") && rev.status === "draft"}
+      preferences={preferences}
     />
   );
 }

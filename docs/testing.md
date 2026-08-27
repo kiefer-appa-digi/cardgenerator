@@ -31,10 +31,14 @@ npm aliases: `npm test`, `npm run typecheck`, `npm run e2e`.
 
 ```
 $ npx vitest run
- Test Files  10 passed (10)
-      Tests  458 passed | 1 skipped (459)
-   Duration  ~7 s
+ Test Files  12 passed (12)
+      Tests  474 passed | 1 skipped (475)
+   Duration  ~1.4 s
 ```
+
+**These counts move.** The suite gained two files and nine tests during the
+single review pass that produced this revision; treat the table below as a
+snapshot and re-run `npx vitest run` rather than trusting it.
 
 | Suite | Tests | Proves |
 | --- | ---: | --- |
@@ -44,10 +48,12 @@ $ npx vitest run
 | `tests/unit/pdf-validate.test.ts` | 62 | the §22 post-export checks, each one broken on purpose to prove it fails |
 | `tests/unit/binding.test.ts` | 59 | variable data, transforms, formatting, visibility, BOM rendering |
 | `tests/unit/import.test.ts` | 56 | the real workbook, plus awkward and hostile sheets |
-| `tests/unit/pdf.test.ts` | 32 (+1 skipped) | geometry, fonts, colour, determinism, overlay exclusion |
+| `tests/unit/pdf.test.ts` | 39 (+1 skipped) | geometry, fonts, colour, determinism, overlay exclusion |
 | `tests/unit/geometry.test.ts` | 9 | the §2/§22 preset fixtures and rounded-rect maths |
 | `tests/unit/interaction.test.ts` | 9 | resize, snap, align, distribute |
+| `tests/unit/clipboard.test.ts` | 5 | the copy/paste envelope: "round-trips validated elements", "refuses a payload that is not a design document", "gives every pasted element a new id and offsets the set", "keeps a group pointing at its own copied children, not the originals", "pastes twice without the two copies sharing ids" |
 | `tests/unit/units.test.ts` | 7 | the µpt substrate |
+| `tests/unit/text-layout.test.ts` | 4 | line breaking on explicit newlines: "breaks where a newline says to, not where the width runs out", "keeps a blank line blank", "does not invent a trailing line for text that ends without a newline", "still wraps a long line that has no newline in it" |
 | `tests/e2e/smoke.spec.ts` | 3 | the auth gate |
 
 The one skipped test is `describe.runIf(process.env.PDF_ARTIFACT_DIR)("artifact
@@ -170,8 +176,11 @@ it did.
 - **Geometry** — page count is exactly two, front then back.
 - **Font embedding** — "embeds every face as a tagged subset, with the program
   present"; **"does not apply OpenType shaping, so PDF advances match the layout
-  engine"**, verified for every ordered pair of characters in the generated
-  metrics charset across all thirteen shipped faces.
+  engine"**. Read what that test actually does before leaning on it: it sets the
+  single string `off->staff` in Archivo 400 and asserts the decoded text comes
+  back with one glyph per code point — enough to prove `liga` and `calt` are off
+  on that face, and **not** a sweep of every character pair across every shipped
+  face. The exhaustive per-face check is the subset-integrity test below.
 - **Subset integrity** — **"every glyph in every embedded face matches the source
   outline"**: `/FontFile2` is extracted back out of the finished PDF and each
   subset glyph is compared with the same glyph in the source font through the
@@ -466,11 +475,16 @@ with it:
 
 §32 forbids marking print QA complete without inspecting a generated PDF.
 
-- `artifacts/pdf/` — production and proof PDFs for all three presets, six files.
-- `artifacts/review/` — those PDFs rendered to PNG, page by page.
-- `artifacts/renders/` — the 11-500 benchmark card, production and proof, both
-  pages.
-- `artifacts/screens/` — twelve application screenshots from the §29 LOOP 5 pass.
+- `artifacts/pdf/` — production and proof PDFs for all three presets, six files
+  (plus `artifacts/pdf/review/`, an earlier copy of the same six).
+- `artifacts/pdf/png/` — those PDFs rendered to PNG, page by page (14 images).
+  **There is no `artifacts/review/` directory**; earlier drafts of this document
+  and of `docs/final-gauntlet-report.md` named one that never existed.
+- `artifacts/renders/` — 8 PNGs of the 11-500 benchmark card: 409TF production
+  and proof, both pages; 206TF production only; 277TF proof only. The set is not
+  symmetric, and nothing regenerates it.
+- `artifacts/screens/` — 62 application screenshots accumulated over the §29
+  review passes.
 
 These are **records of a manual review**, not automated assertions. There is no
 visual-regression baseline and no perceptual diff. See below.

@@ -321,6 +321,120 @@ export class EditorStore {
     });
   }
 
+  /* --------------------------------------------------------- grouping */
+
+  /**
+   * Group and ungroup.
+   *
+   * A group is an ordinary element carrying child ids; it paints nothing itself
+   * and the planner multiplies its opacity and hidden flag into its children.
+   * Keeping it in the same flat element list — rather than nesting — is what
+   * lets the layers panel, hit testing, the exporter and the normalised element
+   * projection all stay simple.
+   */
+  group(ids: string[]): string | null {
+    const side = this.state.side;
+    const members = this.elements().filter((e) => ids.includes(e.id) && e.kind !== "group");
+    if (members.length < 2) return null;
+    const groupId = `g-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`;
+    this.commit((doc) => {
+      const els = doc[side].elements;
+      const memberIds = new Set(members.map((m) => m.id));
+      const bounds = members.reduce(
+        (acc, m) => ({
+          x: Math.min(acc.x, m.frame.x),
+          y: Math.min(acc.y, m.frame.y),
+          r: Math.max(acc.r, m.frame.x + m.frame.w),
+          b: Math.max(acc.b, m.frame.y + m.frame.h),
+        }),
+        {
+          x: Number.POSITIVE_INFINITY,
+          y: Number.POSITIVE_INFINITY,
+          r: Number.NEGATIVE_INFINITY,
+          b: Number.NEGATIVE_INFINITY,
+        },
+      );
+      const groupEl: DesignElement = {
+        id: groupId,
+        kind: "group",
+        name: "Group",
+        childIds: members.map((m) => m.id),
+        frame: { x: bounds.x, y: bounds.y, w: bounds.r - bounds.x, h: bounds.b - bounds.y },
+        rotation: 0,
+        opacity: 10_000,
+        locked: false,
+        hidden: false,
+        templateLocked: false,
+        editableRegion: false,
+        required: false,
+        notes: "",
+      };
+      // The group sits directly below its lowest member so paint order is
+      // unchanged by grouping.
+      const firstIndex = els.findIndex((e) => memberIds.has(e.id));
+      const next = [...els];
+      next.splice(Math.max(0, firstIndex), 0, groupEl);
+      return {
+        ...doc,
+        [side]: {
+          ...doc[side],
+          elements: next.map((e) => (memberIds.has(e.id) ? { ...e, groupId } : e)),
+        },
+      };
+    });
+    this.select([groupId]);
+    return groupId;
+  }
+
+  ungroup(ids: string[]): void {
+    const side = this.state.side;
+    const groups = this.elements().filter((e) => ids.includes(e.id) && e.kind === "group");
+    if (groups.length === 0) return;
+    const groupIds = new Set(groups.map((g) => g.id));
+    const freed = groups.flatMap((g) => (g.kind === "group" ? g.childIds : []));
+    this.commit((doc) => ({
+      ...doc,
+      [side]: {
+        ...doc[side],
+        elements: doc[side].elements
+          .filter((e) => !groupIds.has(e.id))
+          .map((e) => (e.groupId && groupIds.has(e.groupId) ? { ...e, groupId: undefined } : e)),
+      },
+    }));
+    this.select(freed);
+  }
+
+  /** Selecting a grouped element selects the whole group, as in any design tool. */
+  expandSelectionToGroups(ids: string[]): string[] {
+    const els = this.elements();
+    const out = new Set<string>();
+    for (const id of ids) {
+      const el = els.find((e) => e.id === id);
+      if (!el) continue;
+      if (el.groupId && els.some((g) => g.id === el.groupId)) out.add(el.groupId);
+      else out.add(id);
+    }
+    return [...out];
+  }
+
+  /** Every element a selection actually covers, groups expanded to members. */
+  resolveSelection(ids: string[]): DesignElement[] {
+    const els = this.elements();
+    const out = new Map<string, DesignElement>();
+    for (const id of ids) {
+      const el = els.find((e) => e.id === id);
+      if (!el) continue;
+      if (el.kind === "group") {
+        for (const cid of el.childIds) {
+          const child = els.find((e) => e.id === cid);
+          if (child) out.set(child.id, child);
+        }
+      }
+      out.set(el.id, el);
+    }
+    return [...out.values()];
+  }
+
   setSide(side: SideKey): void {
     if (side === this.state.side) return;
     this.set({ side, selection: [], editingTextId: null, dragPreview: null });

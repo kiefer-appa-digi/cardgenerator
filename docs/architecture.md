@@ -43,10 +43,11 @@ specific to this application, not general preference:
    `number` without an explicit cast, and would leak a conversion boundary into
    every layout function.
 2. **No separate query engine binary.** Prisma ships a Rust engine that has to be
-   traced into a serverless function bundle. This app already has to trace font
-   files and an ICC profile into the bundle for PDF export
-   (`outputFileTracingIncludes`); adding a platform-specific binary to that list
-   is a deployment failure mode nobody needs.
+   traced into a serverless function bundle. This app already has to trace the font
+   directory into the bundle for PDF export (`outputFileTracingIncludes` in
+   `next.config.ts`; the output-intent ICC profile is not traced — it is stored
+   base64 in `organizations.settings`); adding a platform-specific binary to that
+   list is a deployment failure mode nobody needs.
 3. **The schema file is the documentation.** `src/server/db/schema.ts` is
    ordinary TypeScript, so every column carries a comment explaining *why* it
    exists next to the type. `docs/data-model.md` quotes it. A `.prisma` schema
@@ -191,9 +192,19 @@ Two deliberate limitations, stated rather than hidden:
   engine's `unmappedGlyphs` flag, which preflight reports — rather than laying
   out silently wrong.
 
-Only the three shipped OFL-1.1 families (Inter, Archivo, Barlow Condensed) can be
-used, because only a font the application ships can be guaranteed embeddable.
-An unknown family falls back to Inter 400 and raises `FONT_MISSING`.
+Only the five shipped OFL-1.1 families — Inter (5 faces), Archivo (4), Barlow
+Condensed (4), Oswald (5) and Bebas Neue (1), nineteen faces in all
+(`FONT_FAMILIES` in `src/lib/text/fonts.ts`) — can be used, because only a font
+the application ships can be guaranteed embeddable. An unknown family falls back
+to Inter 400 and raises `FONT_MISSING`.
+
+**Licence caveat, stated rather than assumed.** All five families are declared
+`license: "OFL-1.1"` in the registry, and all five are OFL-1.1 upstream — but
+the single `src/assets/fonts/OFL.txt` shipped alongside them carries only the
+Inter copyright notice. OFL-1.1 §1 requires each family's own copyright notice
+to travel with the font, so Archivo, Barlow Condensed, Oswald and Bebas Neue are
+currently redistributed without theirs. Adding the four missing notices to
+`OFL.txt` is the fix; it has not been done.
 
 ### exceljs, not SheetJS
 
@@ -235,8 +246,8 @@ loaded in a server action, never in a client bundle.
   credentials, so the storage boundary is never the untested one.
 
 **Cost accepted:** vendor coupling. It is contained to one 119-line module with
-four functions (`putAsset`, `readAsset`, `deleteAsset`, `storageMode`). Swapping
-in S3 is a rewrite of that file and nothing else.
+five exported functions (`storageMode`, `putAsset`, `readAsset`, `deleteAsset`,
+`assetExists`). Swapping in S3 is a rewrite of that file and nothing else.
 
 ### The rest, briefly
 
@@ -285,7 +296,7 @@ src/
     color/types.ts            PrintColor (cmyk|gray|spot|none), black rules, output intent,
                               brand swatches, CMYK→sRGB *preview* approximation
     text/
-      fonts.ts                the three shipped OFL families and their faces
+      fonts.ts                the five shipped OFL families (19 faces) and their metrics keys
       metrics.json            generated from the shipped TTFs
       layout.ts               THE layout engine — line breaking, advances, baselines
     barcode/
