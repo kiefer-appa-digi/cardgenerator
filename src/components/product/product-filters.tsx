@@ -42,14 +42,17 @@ export function ProductFilters({
   const router = useRouter();
   const [pending, startNavigation] = useTransition();
   const [q, setQ] = useState(initial.q);
-  // The last query string this component put in the URL, so an incoming value
-  // that we did not cause (Clear, back button) overwrites the box and one we
-  // did cause does not fight the cursor.
+  // The search term currently IN THE URL, always trimmed, because that is the
+  // form the page puts there. Held so that an incoming value we did not cause
+  // (Clear, back button) overwrites the box and one we did cause does not fight
+  // the cursor. Comparing trimmed-to-trimmed matters: a half-typed "brake " is
+  // the same query as "brake", so it must neither re-navigate nor let the URL's
+  // trimmed value be written back over the space the operator just typed.
   const pushed = useRef(initial.q);
 
   const push = useCallback(
     (next: ProductFilterState) => {
-      pushed.current = next.q;
+      pushed.current = next.q.trim();
       const params = new URLSearchParams();
       if (next.q.trim()) params.set("q", next.q.trim());
       if (next.brand) params.set("brand", next.brand);
@@ -68,7 +71,7 @@ export function ProductFilters({
   }, [initial.q]);
 
   useEffect(() => {
-    if (q === pushed.current) return;
+    if (q.trim() === pushed.current) return;
     const timer = setTimeout(() => push({ ...initial, q }), 250);
     return () => clearTimeout(timer);
     // `initial` is re-read on every navigation; the select values it carries are

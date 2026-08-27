@@ -6,6 +6,7 @@ import {
   sanitiseDigits,
   type GtinLength,
 } from "@/lib/barcode/gtin";
+import { normaliseUpcA } from "@/lib/barcode/upc";
 
 /**
  * Check-digit state for a stored product identifier.

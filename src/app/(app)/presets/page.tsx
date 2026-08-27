@@ -4,9 +4,10 @@ import { cardDesigns, cardPresets, cardTemplates, db, packageTypes } from "@/ser
 import { requireUser } from "@/server/auth/current";
 import { PageHeader, Panel, EmptyState, Stat, Badge } from "@/components/ui/panel";
 import { Button } from "@/components/ui/button";
-import { DielineFigure } from "@/components/preset/dieline-figure";
+import { DIELINE_TONES, DielineFigure, figureBoxWidthIn } from "@/components/preset/dieline-figure";
 import { insetSummary } from "@/components/preset/dimensions";
 import { DiscrepancyTable } from "@/components/preset/discrepancy-table";
+import { presetRecordMatches } from "@/components/preset/record-match";
 import {
   CARD_PRESETS,
   PRESET_CODES,
@@ -15,7 +16,7 @@ import {
   presetDiscrepancies,
   safeCornerRadius,
 } from "@/lib/geometry/presets";
-import { formatLength, uptToIn } from "@/lib/units";
+import { formatLength } from "@/lib/units";
 import type { ReactNode } from "react";
 
 export const dynamic = "force-dynamic";
@@ -30,6 +31,11 @@ const THUMB_PX_PER_IN = 38;
 export default async function PresetsPage() {
   const user = await requireUser();
 
+  /**
+   * Every geometric column is read, not just the trim size: the "record
+   * matches" badge below is the same comparison the detail screen makes, and a
+   * partial SELECT here would let the two screens disagree about the same row.
+   */
   const presetRows = await db
     .select({
       id: cardPresets.id,
@@ -37,6 +43,14 @@ export default async function PresetsPage() {
       trimWidth: cardPresets.trimWidth,
       trimHeight: cardPresets.trimHeight,
       cornerRadius: cardPresets.cornerRadius,
+      bleedTop: cardPresets.bleedTop,
+      bleedRight: cardPresets.bleedRight,
+      bleedBottom: cardPresets.bleedBottom,
+      bleedLeft: cardPresets.bleedLeft,
+      safeTop: cardPresets.safeTop,
+      safeRight: cardPresets.safeRight,
+      safeBottom: cardPresets.safeBottom,
+      safeLeft: cardPresets.safeLeft,
       vendor: packageTypes.vendor,
       material: packageTypes.material,
     })
@@ -114,13 +128,16 @@ export default async function PresetsPage() {
           {PRESET_CODES.map((code) => {
             const p = CARD_PRESETS[code];
             const row = dbByCode.get(code);
-            const seededMatches =
-              !!row &&
-              row.trimWidth === p.trimWidth &&
-              row.trimHeight === p.trimHeight &&
-              row.cornerRadius === p.cornerRadius;
+            const seededMatches = presetRecordMatches(row, p);
             const conflicts = discrepancies.filter((d) => d.preset === code);
-            const widthPx = Math.round(uptToIn(fullBleedWidth(p)) * THUMB_PX_PER_IN);
+            /**
+             * The container is sized to the WHOLE figure box, gutter included,
+             * because the SVG scales its viewBox to the container width. Sizing
+             * it to the card alone would make each preset's gutter eat a
+             * different fraction of the width and quietly break the common
+             * scale this page claims.
+             */
+            const widthPx = Math.round(figureBoxWidthIn(p, "thumb") * THUMB_PX_PER_IN);
 
             return (
               <Panel
@@ -181,7 +198,7 @@ export default async function PresetsPage() {
                   <Badge tone={conflicts.length > 0 ? "warning" : "neutral"}>
                     {conflicts.length} CAD conflict{conflicts.length === 1 ? "" : "s"}
                   </Badge>
-                  <span className="numeric ml-auto text-[11px] text-ink-500">
+                  <span className="numeric ml-auto text-[11px] text-ink-400">
                     {count(templatesByCode.get(code) ?? 0, "template")} ·{" "}
                     {count(designsByCode.get(code) ?? 0, "card")}
                   </span>
@@ -191,10 +208,18 @@ export default async function PresetsPage() {
           })}
         </div>
 
-        <p className="-mt-2 text-xs text-ink-500">
-          The three figures above are drawn at one common scale, so their relative sizes on this
-          page are their relative sizes on the press sheet.
-        </p>
+        <div className="-mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-ink-400">
+          <span>
+            Drawn at one common scale, so their relative sizes on this page are their relative
+            sizes on the press sheet.
+          </span>
+          <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <Key tone="bleed">bleed</Key>
+            <Key tone="trim">trim</Key>
+            <Key tone="safe">safe area</Key>
+            <Key tone="cavity">cavity</Key>
+          </span>
+        </div>
 
         <Panel
           title="Source conflicts"
@@ -234,6 +259,21 @@ function SpecRow({ term, children }: { term: string; children: ReactNode }) {
   );
 }
 
+/** These sublines carry real dimensions, so they get the readable grey. */
 function Sub({ children }: { children: ReactNode }) {
-  return <span className="mt-0.5 block text-[11px] text-ink-500">{children}</span>;
+  return <span className="mt-0.5 block text-[11px] text-ink-400">{children}</span>;
+}
+
+/** Decodes one of the figure's four colours; the thumbnails carry no legend. */
+function Key({ tone, children }: { tone: keyof typeof DIELINE_TONES; children: ReactNode }) {
+  return (
+    <span className="flex items-center gap-1.5">
+      <span
+        aria-hidden
+        className="h-2 w-2 shrink-0 rounded-[1px]"
+        style={{ backgroundColor: DIELINE_TONES[tone].line }}
+      />
+      {children}
+    </span>
+  );
 }

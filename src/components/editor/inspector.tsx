@@ -12,6 +12,7 @@ import type { DesignElement } from "@/lib/design/schema";
 import type { EditorStore } from "@/lib/editor/store";
 import { useEditorSelector } from "@/lib/editor/store";
 import { cn } from "@/lib/cn";
+import { AssetPicker, type EditorAsset } from "./asset-picker";
 
 /**
  * THE INSPECTOR
@@ -22,7 +23,15 @@ import { cn } from "@/lib/cn";
  * land on an exact µpt integer. Colour is authored in CMYK tints, never in hex.
  */
 
-export function Inspector({ store }: { store: EditorStore }) {
+export function Inspector({
+  store,
+  assets,
+  onAssetUploaded,
+}: {
+  store: EditorStore;
+  assets: EditorAsset[];
+  onAssetUploaded?: (asset: EditorAsset) => void;
+}) {
   const selection = useEditorSelector(store, (s) => s.selection.join(","));
   const elements = useEditorSelector(store, (s) => s.doc[s.side].elements);
   const unit = useEditorSelector(store, (s) => s.unit);
@@ -128,7 +137,15 @@ export function Inspector({ store }: { store: EditorStore }) {
         </div>
       </Section>
 
-      {!multi ? <KindProperties store={store} el={el} unit={unit} /> : null}
+      {!multi ? (
+        <KindProperties
+          store={store}
+          el={el}
+          unit={unit}
+          assets={assets}
+          onAssetUploaded={onAssetUploaded}
+        />
+      ) : null}
 
       <Section title="Production">
         <Toggle
@@ -178,10 +195,14 @@ function KindProperties({
   store,
   el,
   unit,
+  assets,
+  onAssetUploaded,
 }: {
   store: EditorStore;
   el: DesignElement;
   unit: LengthUnit;
+  assets: EditorAsset[];
+  onAssetUploaded?: (asset: EditorAsset) => void;
 }) {
   const ids = [el.id];
 
@@ -525,8 +546,38 @@ function KindProperties({
   }
 
   if (el.kind === "image") {
+    const asset = assets.find((a) => a.id === el.assetId) ?? null;
+    // Effective resolution at the placed size, which is the number a press cares
+    // about — not whatever DPI the file claims in its header.
+    const effectiveDpi =
+      asset?.pixelWidth && el.frame.w > 0
+        ? Math.round((asset.pixelWidth * (el.crop.w / 10_000)) / (el.frame.w / 72_000_000))
+        : null;
     return (
       <Section title="Image">
+        <AssetPicker
+          assets={assets}
+          selectedId={el.assetId}
+          onSelect={(assetId) =>
+            store.updateElements(ids, (e) => ({ ...e, assetId }), { coalesceKey: "img-asset" })
+          }
+          onUploaded={onAssetUploaded}
+        />
+        {effectiveDpi !== null ? (
+          <p
+            className={cn(
+              "numeric mt-1.5 text-[10px] leading-snug",
+              effectiveDpi < 200
+                ? "text-sev-error"
+                : effectiveDpi < 300
+                  ? "text-sev-warning"
+                  : "text-ink-500",
+            )}
+          >
+            {effectiveDpi} dpi at this size
+            {effectiveDpi < 300 ? " — below the 300 dpi the preflight profile asks for" : ""}
+          </p>
+        ) : null}
         <SelectField
           label="Fit"
           value={el.fit}

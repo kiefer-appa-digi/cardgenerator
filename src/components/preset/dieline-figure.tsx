@@ -9,7 +9,7 @@ import {
   type CardPresetDef,
 } from "@/lib/geometry/presets";
 import { roundedRectPath, segsToSvgPath, type Rect } from "@/lib/geometry/types";
-import { formatLength, uptToPt } from "@/lib/units";
+import { PT_PER_IN, formatLength, uptToIn, uptToPt } from "@/lib/units";
 import { insetSummary } from "@/components/preset/dimensions";
 import { cn } from "@/lib/cn";
 import type { ReactNode } from "react";
@@ -21,27 +21,31 @@ import type { ReactNode } from "react";
  * corner radius, the safe area with ITS own (smaller) radius, the measured
  * cavity footprint, the centre lines and dimension leaders.
  *
- * SVG user space is PDF points, 1:1 with the exported page, exactly as the
- * editor artboard does it — so a distance measured on this figure with a ruler
- * at 100 % is the distance on the press sheet. Nothing here is redrawn by hand:
- * every rectangle comes from the same helpers the exporter uses, and the trim
- * outline is the same `roundedRectPath` the production clipping path is cut
- * from. The overlay colours are the artboard's, so the figure and the editor
- * speak one language.
+ * SVG user space is PDF points, the same coordinate system as the exported
+ * page, exactly as the editor artboard does it. The figure is fitted to its
+ * container, so it is not printed at physical size — but every proportion, and
+ * every corner, is the press sheet's. Nothing here is redrawn by hand: every
+ * rectangle comes from the same helpers the exporter uses, and the trim outline
+ * is the same `roundedRectPath` the production clipping path is cut from. The
+ * overlay colours are the artboard's, so the figure and the editor speak one
+ * language.
  */
 
 const PT = (u: number) => uptToPt(u);
 const n = (v: number) => Number(v.toFixed(3));
 
 /** Line colours are the artboard's; text uses the lighter tint of the same hue
- *  because the saturated red and blue fall below 4.5:1 on the console black. */
-const TONES = {
+ *  because the saturated red and blue fall below 4.5:1 on the console black.
+ *  Exported so a screen that shows a figure without its legend can still key
+ *  the colours — an unlabelled four-colour drawing is a puzzle, not a spec. */
+export const DIELINE_TONES = {
   bleed: { line: "#e0a33a", text: "#e8bd6d" },
   trim: { line: "#1d9ed9", text: "#6ec8ee" },
   safe: { line: "#3fae72", text: "#6fc79a" },
   cavity: { line: "#e82627", text: "#f37b79" },
 } as const;
-type Tone = keyof typeof TONES;
+const TONES = DIELINE_TONES;
+export type Tone = keyof typeof DIELINE_TONES;
 
 const BG = "#0b0d0f";
 const FONT = 9;
@@ -49,6 +53,22 @@ const TICK = 3;
 /** Offsets of the first and second dimension line from the card edge, in pt. */
 const D1 = 15;
 const D2 = 33;
+/** Gutter around the bleed page, in pt: room for the leaders, or a hairline. */
+const GUTTER: Record<"detail" | "thumb", number> = { detail: 46, thumb: 5 };
+
+/**
+ * Width of the whole figure box — bleed page plus gutter — in inches.
+ *
+ * A caller that sizes the figure's container needs this rather than the card
+ * width: the SVG fits its viewBox to the container, so a container sized to the
+ * card alone renders every preset at a slightly different scale.
+ */
+export function figureBoxWidthIn(
+  preset: CardPresetDef,
+  variant: "detail" | "thumb" = "detail",
+): number {
+  return uptToIn(fullBleedWidth(preset)) + (GUTTER[variant] * 2) / PT_PER_IN;
+}
 
 const toPt = (r: Rect) => ({ x: PT(r.x), y: PT(r.y), w: PT(r.w), h: PT(r.h) });
 const chipW = (label: string) => label.length * FONT * 0.54 + 6;
@@ -200,7 +220,7 @@ export function DielineFigure({
 
   const detail = variant === "detail";
   const showLegend = legend ?? detail;
-  const G = detail ? 46 : 5;
+  const G = GUTTER[variant];
   const vbW = bleed.w + G * 2;
   const vbH = bleed.h + G * 2;
 

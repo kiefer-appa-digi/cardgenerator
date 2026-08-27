@@ -43,7 +43,8 @@ export type DimGroup = {
 export function DimensionTable({ groups }: { groups: DimGroup[] }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full text-sm">
+      {/* Below this the unit columns start wrapping mid-number; scroll instead. */}
+      <table className="w-full min-w-[34rem] text-sm">
         <caption className="sr-only">
           Every authoritative dimension of this preset in inches, millimetres and PDF points.
         </caption>
@@ -82,7 +83,7 @@ export function DimensionTable({ groups }: { groups: DimGroup[] }) {
                 <th scope="row" className="px-4 py-2 text-left font-normal text-ink-200">
                   {r.label}
                   {r.note ? (
-                    <span className="mt-0.5 block text-[11px] leading-snug text-ink-500">{r.note}</span>
+                    <span className="mt-0.5 block text-[11px] leading-snug text-ink-400">{r.note}</span>
                   ) : null}
                 </th>
                 <td className="numeric px-4 py-2 text-right font-medium text-ink-50">
@@ -152,7 +153,7 @@ export function HeroDimension({
         <div>{pair("mm")}</div>
         <div>{pair("pt")}</div>
       </div>
-      {hint ? <div className="mt-2 text-[11px] leading-snug text-ink-500">{hint}</div> : null}
+      {hint ? <div className="mt-2 text-[11px] leading-snug text-ink-400">{hint}</div> : null}
     </div>
   );
 }
@@ -162,7 +163,7 @@ export function TripleInline({ value }: { value: Upt }) {
   return (
     <span className="numeric">
       {formatLength(value, "in")} in
-      <span className="text-ink-500">
+      <span className="text-ink-400">
         {" · "}
         {formatLength(value, "mm")} mm · {formatLength(value, "pt")} pt
       </span>

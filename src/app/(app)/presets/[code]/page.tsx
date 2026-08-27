@@ -23,6 +23,7 @@ import {
   safeRect,
   type CardPresetDef,
 } from "@/lib/geometry/presets";
+import { geometryMismatches, presetRecordMatches } from "@/components/preset/record-match";
 import { formatLength, inToUpt } from "@/lib/units";
 
 export const dynamic = "force-dynamic";
@@ -92,20 +93,12 @@ export default async function PresetDetailPage({
   const cavityMarginRight = trimBox.w - p.cavity.rect.x - p.cavity.rect.w;
   const cavityMarginBottom = trimBox.h - p.cavity.rect.y - p.cavity.rect.h;
 
-  /** The database row must carry exactly the authoritative geometry. */
-  const recordMatches =
-    !!record &&
-    record.trimWidth === p.trimWidth &&
-    record.trimHeight === p.trimHeight &&
-    record.cornerRadius === p.cornerRadius &&
-    record.bleedTop === p.bleed.top &&
-    record.bleedRight === p.bleed.right &&
-    record.bleedBottom === p.bleed.bottom &&
-    record.bleedLeft === p.bleed.left &&
-    record.safeTop === p.safeArea.top &&
-    record.safeRight === p.safeArea.right &&
-    record.safeBottom === p.safeArea.bottom &&
-    record.safeLeft === p.safeArea.left;
+  /**
+   * The database row must carry exactly the authoritative geometry. The same
+   * comparison backs the badge on /presets, so the two screens cannot disagree.
+   */
+  const mismatches = geometryMismatches(record, p);
+  const recordMatches = presetRecordMatches(record, p);
 
   const groups: DimGroup[] = [
     {
@@ -241,7 +234,7 @@ export default async function PresetDetailPage({
         <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,34rem)_1fr]">
           <Panel
             title="Dieline"
-            description="Drawn to scale in PDF points, 1:1 with the exported page."
+            description="Drawn to scale. The figure's user space is PDF points — the same coordinate system, and the same rounded-corner path, as the exported page."
           >
             <div className="p-4">
               <DielineFigure preset={p} />
@@ -342,7 +335,7 @@ export default async function PresetDetailPage({
                     relying on it for artwork that runs into the cavity corners.
                   </p>
                 ) : null}
-                <p className="text-xs leading-relaxed text-ink-500">
+                <p className="text-xs leading-relaxed text-ink-400">
                   The cavity is an overlay only. It marks where the clamshell blister sits over the
                   printed card so artwork can be kept clear of it; it is never printed and never
                   clips the artwork.
@@ -373,11 +366,20 @@ export default async function PresetDetailPage({
                           : "differs from the authoritative preset"}
                       </Badge>
                       {!recordMatches ? (
-                        <p className="mt-1.5 text-xs leading-relaxed text-flag-300">
-                          The stored trim, bleed or safe values do not match the preset definition.
-                          Re-run the seed so the record and the application agree before exporting
-                          production artwork.
-                        </p>
+                        <>
+                          <p className="mt-1.5 text-xs leading-relaxed text-flag-300">
+                            The stored geometry does not match the preset definition. Re-run the
+                            seed so the record and the application agree before exporting
+                            production artwork.
+                          </p>
+                          <ul className="mt-1.5 space-y-0.5">
+                            {mismatches.map((m) => (
+                              <li key={m.field} className="numeric text-[11px] text-ink-300">
+                                {m.field}: stored {m.stored}, preset {m.expected}
+                              </li>
+                            ))}
+                          </ul>
+                        </>
                       ) : null}
                     </dd>
                   </div>
@@ -402,7 +404,7 @@ export default async function PresetDetailPage({
                     Templates on this dieline
                   </h3>
                   {templates.length === 0 ? (
-                    <p className="mt-1.5 text-xs text-ink-500">
+                    <p className="mt-1.5 text-xs text-ink-400">
                       None yet.{" "}
                       <Link href="/templates" className="text-brand-300 hover:text-brand-200">
                         Create one →
@@ -414,7 +416,7 @@ export default async function PresetDetailPage({
                         <li key={t.id} className="flex items-center gap-2 text-sm text-ink-200">
                           <span className="min-w-0 truncate">{t.name}</span>
                           {t.isMaster ? <Badge tone="brand">master</Badge> : null}
-                          <span className="numeric text-[11px] text-ink-500">v{t.version}</span>
+                          <span className="numeric text-[11px] text-ink-400">v{t.version}</span>
                         </li>
                       ))}
                     </ul>
@@ -425,7 +427,7 @@ export default async function PresetDetailPage({
                     Cards on this dieline
                   </h3>
                   {designs.length === 0 ? (
-                    <p className="mt-1.5 text-xs text-ink-500">
+                    <p className="mt-1.5 text-xs text-ink-400">
                       None yet.{" "}
                       <Link href="/designs/new" className="text-brand-300 hover:text-brand-200">
                         Start one →

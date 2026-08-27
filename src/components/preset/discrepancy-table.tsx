@@ -29,7 +29,9 @@ export function DiscrepancyTable({
 }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full text-sm">
+      {/* A minimum width, so a narrow panel scrolls the table sideways instead
+          of squeezing "Reading" into a one-word-per-line column. */}
+      <table className="w-full min-w-[64rem] text-sm">
         <caption className="sr-only">
           Every numeric disagreement between the authoritative card presets and the supplied CAD
           drawings.
@@ -79,7 +81,10 @@ export function DiscrepancyTable({
                     </Link>
                   </td>
                 ) : null}
-                <th scope="row" className="px-4 py-2.5 text-left font-normal text-ink-200">
+                <th
+                  scope="row"
+                  className="whitespace-nowrap px-4 py-2.5 text-left font-normal text-ink-200"
+                >
                   {d.field}
                 </th>
                 <td className="numeric px-4 py-2.5 text-right font-medium text-ink-50">
@@ -100,7 +105,7 @@ export function DiscrepancyTable({
                   {larger ? "+" : ""}
                   {mm(d.deltaIn)}
                 </td>
-                <td className="max-w-md px-4 py-2.5">
+                <td className="w-[24rem] max-w-md px-4 py-2.5">
                   <div className="flex flex-wrap items-center gap-1.5">
                     <Badge tone={d.severity === "warning" ? "warning" : "info"}>
                       {larger ? "card larger" : "card smaller"}

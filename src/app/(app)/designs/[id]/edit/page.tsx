@@ -52,6 +52,7 @@ export default async function EditPage({ params }: PageProps<"/designs/[id]/edit
       }
       assets={orgAssets.map((a) => ({
         id: a.id,
+        filename: a.filename,
         pixelWidth: a.pixelWidth,
         pixelHeight: a.pixelHeight,
         colorSpace: a.colorSpace,

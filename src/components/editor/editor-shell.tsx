@@ -49,7 +49,7 @@ export function EditorShell({
   initialDoc: DesignDoc;
   product: ProductContext;
   productLabel: string;
-  assets: Array<AssetInfo & { url: string }>;
+  assets: Array<AssetInfo & { url: string; filename?: string }>;
   status: string;
   revisionNumber: number;
   canWrite: boolean;
@@ -71,17 +71,24 @@ export function EditorShell({
   const [report, setReport] = useState<PreflightReport | null>(null);
   const [checking, setChecking] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Uploading from inside the editor has to add to this list immediately;
+  // otherwise the asset the designer just chose renders as a missing placeholder
+  // until the next full page load.
+  const [extraAssets, setExtraAssets] = useState<
+    Array<AssetInfo & { url: string; filename?: string }>
+  >([]);
+  const allAssets = useMemo(() => [...extraAssets, ...assets], [extraAssets, assets]);
 
   const assetMap = useMemo(() => {
     const m = new Map<string, AssetInfo>();
-    for (const a of assets) m.set(a.id, a);
+    for (const a of allAssets) m.set(a.id, a);
     return m;
-  }, [assets]);
+  }, [allAssets]);
   const assetUrls = useMemo(() => {
     const m = new Map<string, string>();
-    for (const a of assets) m.set(a.id, a.url);
+    for (const a of allAssets) m.set(a.id, a.url);
     return m;
-  }, [assets]);
+  }, [allAssets]);
   const assetUrl = useCallback((id: string) => assetUrls.get(id) ?? null, [assetUrls]);
 
   const plan = useMemo(
@@ -434,7 +441,33 @@ export function EditorShell({
         </div>
 
         <aside className="w-64 shrink-0 border-l border-ink-800 bg-ink-900">
-          <Inspector store={store} />
+          <Inspector
+            store={store}
+            assets={allAssets.map((a) => ({
+              id: a.id,
+              url: a.url,
+              filename: a.filename,
+              pixelWidth: a.pixelWidth,
+              pixelHeight: a.pixelHeight,
+              colorSpace: a.colorSpace,
+              contentType: a.contentType,
+            }))}
+            onAssetUploaded={(a) =>
+              setExtraAssets((prev) => [
+                {
+                  id: a.id,
+                  url: a.url,
+                  filename: a.filename,
+                  pixelWidth: a.pixelWidth,
+                  pixelHeight: a.pixelHeight,
+                  colorSpace: a.colorSpace,
+                  contentType: a.contentType,
+                  hasIccProfile: false,
+                },
+                ...prev,
+              ])
+            }
+          />
         </aside>
       </div>
 
