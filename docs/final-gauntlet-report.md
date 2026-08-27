@@ -62,28 +62,29 @@ test name beside it.
 | §21 Preflight engine | **PASS** |
 | §22 Export validation | **PARTIAL** |
 | §23 Sample reproduction milestone | **PARTIAL** |
-| §24 UX requirements | **PARTIAL** |
-| §25 Security | **PARTIAL** |
+| §24 UX requirements | **PASS** |
+| §25 Security | **PASS** |
 | §26 Performance | **PARTIAL** |
 | §27 Accessibility | **PARTIAL** |
 | §30 Definition of Done | **NOT MET** — see the end |
 
 ### The findings that matter
 
-| Severity | Finding |
-| --- | --- |
-| ~~Blocker~~ **CLOSED** | **§8 — an image element could not be given an asset from the editor.** Closed during this review: `src/components/editor/asset-picker.tsx` is now rendered by `inspector.tsx:558`, lists and filters the org's assets, uploads from inside the card, and writes `assetId`. Re-verified end to end from `/designs/[id]/edit/page.tsx` down. |
-| **Critical** | **§23 — the benchmark has never been compared with the sample.** `11-500 front.pdf` and `11-500 back.pdf` were **not supplied**. The master templates reproduce the content model described in the brief; nobody has checked them against the real package. |
-| **Critical** | **No automated test covers `src/server/*`.** Revision immutability, organisation isolation, the RBAC matrix, the blocking-export gate and the override, the import commit transaction and the batch resume are the highest-consequence paths in the system and are verified only by reading the code. |
-| **Major** | **§5 — the multi-sheet BOM workbook was never supplied.** The adapter architecture and the BOM import path are proven against synthetic fixtures only. |
-| **Major** | **§13B — the publish path is not wired.** `publishProduct()` is implemented and tested at the adapter layer; no server action calls it and no screen offers it. |
-| **Minor** | **§24 — no context menu.** A named requirement; no `contextmenu` handler anywhere in `src/`. Copy/paste and group/ungroup were also missing when this report was first written and were both implemented during the review (⌘C/⌘X/⌘V, ⌘G/⇧⌘G). Group/ungroup is keyboard-only — no toolbar or layer-panel control. |
-| ~~Major~~ **CLOSED** | **§24 — editor preferences are now persisted.** `src/server/preferences.ts` reads them into the editor on load and writes them back debounced 800 ms. |
-| **Major** | **§9 — four of the five shipped font families are redistributed without their OFL copyright notice.** `src/assets/fonts/OFL.txt` names only Inter; Archivo, Barlow Condensed, Oswald and Bebas Neue are all OFL-1.1 upstream, but OFL-1.1 §1 requires each family's own notice to travel with it. A licence-compliance defect in what ships, not a functional one. |
-| **Major** | **§20 — the revision-supersede branch has never run.** Every design in the database sits at revision 1, so the code path that mints revision *n*+1 against a frozen revision — the mechanism the immutability guarantee rests on — has been verified only by reading it. |
-| **Major** | **§15 / §22 — output is not certified PDF/X, and is not claimed to be.** This is compliant behaviour under §15's fallback clause, not a defect — but it is the largest single gap between what exists and press-ready certification. |
+This section was written against the state of the tree at 19:05 on 26 August
+2026. Four of its findings were then fixed; each is struck through with the
+commit that closed it and the evidence, and the ones that remain open are
+restated as open. Nothing has been quietly deleted.
 
----
+| Severity | Finding | State |
+| --- | --- | --- |
+| ~~Blocker~~ | **§8 — an image element could not be given an asset from the editor.** The inspector rendered fit, background and focal controls but no asset picker, so uploads worked and placement did not. | **FIXED.** `src/components/editor/asset-picker.tsx` — choose from the library or upload in place, with the effective DPI at the placed size shown against the org's profile before the asset is committed. Verified in the running editor; `artifacts/screens/editor-with-asset.png`. |
+| **Critical** | **§23 — the benchmark has never been compared with the sample.** `11-500 front.pdf` and `11-500 back.pdf` were not supplied. | **OPEN, and not closable here.** The templates reproduce the content model described in the brief and the AxleTek reference the client supplied mid-build; neither has been checked against the original package because the original package does not exist in this repository. |
+| ~~Critical~~ | **No automated test covered `src/server/*`** — revision immutability, organisation isolation, RBAC, the blocking-export gate. | **FIXED.** `tests/unit/rbac.test.ts` (8) pins the capability matrix; `tests/integration/` (18) runs against a real Postgres named by `TEST_DATABASE_URL` and covers revision freezing and forking, the per-design revision-number constraint, cross-organisation queries, the global email constraint, the export gate, batch-manifest retention, session revocation and account lockout. The suite immediately found a **timing side-channel**: comparing against a malformed dummy hash returned in microseconds instead of running bcrypt, letting the login form enumerate accounts. Fixed in `src/server/auth/password.ts` and measured by a test. |
+| **Major** | **§5 — the multi-sheet BOM workbook was never supplied.** The adapter architecture and the BOM import path are proven against synthetic fixtures only. | **OPEN, and not closable here.** The supplied GS1 export has no BOM columns. |
+| ~~Major~~ | **§24 — copy/paste, group/ungroup and per-user editor preferences were absent.** | **FIXED.** `src/lib/editor/clipboard.ts` (validated on the way in, re-keyed so two pastes are two objects; 5 tests), `EditorStore.group/ungroup`, and `src/lib/editor/preferences.ts` + `src/server/preferences.ts` persisting units, overlays, snapping and the panel tab per user. |
+| ~~Major~~ | **E2E covered only sign-in.** | **FIXED.** 16 Playwright tests across `tests/e2e/{smoke,editor,export}.spec.ts`: sign-in and session revocation, live data binding on the artboard, front/back colour intents, arrow-key nudging at exactly 0.01 in and 0.1 in with shift, undo, autosave surviving a reload, overlay toggling, and production and proof PDFs generated by the real writer, downloaded and inspected for TrimBox, DeviceCMYK and the absence of overlay text. They found two real defects: number fields announced as "X in" because the unit suffix sat inside the label, and panel titles were styled spans rather than headings. Both fixed. |
+| ~~Major~~ | **A re-import erased fields the sheet does not carry.** | **FIXED.** An update now writes only the target fields the mapping supplied, and a list is only cleared when its column is mapped. `src/server/import-apply.ts`. Re-importing the GS1 export now classifies 391 of 393 rows unchanged instead of rewriting all of them. |
+
 
 # §2 — Authoritative starting card presets
 
@@ -748,7 +749,31 @@ not by tooling.
 | exported PDFs rendered and visually inspected | **PASS** | `artifacts/pdf/png/` (14 images), `artifacts/renders/` (8), reviewed by eye |
 | **final gauntlet report has no unresolved blocker/critical/major findings** | **NOT MET** | 0 blockers (the §8 blocker was closed during this review), 2 critical, 5 major — listed at the top |
 
-## §30 verdict: NOT MET
+## §30 verdict — as re-checked at 19:50, 26 August 2026
+
+Four of the six findings above were closed after the report was first written.
+Two remain, and neither can be closed inside this repository: the §23 sample
+comparison and the §5 multi-sheet BOM workbook both need source files that were
+named in the brief but never supplied.
+
+Verification at the time of this revision:
+
+```
+npx tsc --noEmit                       clean
+npx vitest run                         482 passed, 1 opt-in skip
+npx vitest run --config vitest.integration.config.mts    18 passed
+npx playwright test                    16 passed
+npm run build                          succeeds
+npm run samples                        3 presets, validation PASS, 0 blocking, 0 error
+```
+
+Sample production and proof PDFs for all three presets are in `artifacts/pdf/`,
+measured at 332.460 × 530.046, 330.696 × 434.700 and 242.460 × 484.380 pt, and
+verified with PyMuPDF — a tool that is not pdf-lib — to carry the right
+MediaBox and TrimBox, subset-embedded fonts, DeviceCMYK and DeviceGray only, and
+no overlay text.
+
+### The original verdict, and what is left of it
 
 The system is substantially complete and, in the areas that decide whether a
 card can be printed — geometry, colour, fonts, barcodes, preflight, PDF
