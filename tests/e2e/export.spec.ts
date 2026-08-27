@@ -62,8 +62,17 @@ test.describe("export", () => {
     await page.getByRole("button", { name: /Production PDF/ }).click();
     await expect(page.locator("a[download]")).toBeVisible({ timeout: 90_000 });
 
-    await page.goto("/exports");
+    // The job row is written after the download link appears, so poll the list
+    // rather than assuming it has landed by the time the page renders once.
+    await expect
+      .poll(
+        async () => {
+          await page.goto("/exports");
+          return page.getByText("409TF").count();
+        },
+        { timeout: 30_000, intervals: [1000, 2000, 3000] },
+      )
+      .toBeGreaterThan(0);
     await expect(page.getByRole("heading", { name: "Exports" })).toBeVisible();
-    await expect(page.getByText("409TF").first()).toBeVisible();
   });
 });
