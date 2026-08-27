@@ -124,10 +124,10 @@ export function Gs1RequestLog({
                           Redacted payload
                         </summary>
                         <div className="mt-2 grid gap-2 lg:grid-cols-2">
-                          <pre className="max-h-56 overflow-auto rounded border border-ink-800 bg-ink-950 p-2 font-mono text-[11px] leading-relaxed text-ink-300">
+                          <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all rounded border border-ink-800 bg-ink-950 p-2 font-mono text-[11px] leading-relaxed text-ink-300">
                             {pretty(row.requestSummary)}
                           </pre>
-                          <pre className="max-h-56 overflow-auto rounded border border-ink-800 bg-ink-950 p-2 font-mono text-[11px] leading-relaxed text-ink-300">
+                          <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all rounded border border-ink-800 bg-ink-950 p-2 font-mono text-[11px] leading-relaxed text-ink-300">
                             {pretty(row.responseSummary)}
                           </pre>
                         </div>

@@ -26,6 +26,11 @@ export function isGrayscaleSpace(space: string): boolean {
   return GRAYSCALE_SPACES.test(space.trim());
 }
 
+/** Already-separated process colour. */
+export function isCmykSpace(space: string): boolean {
+  return /^(cmyk|cmyk16|devicecmyk|four-?colou?r)$/i.test(space.trim());
+}
+
 /** Colour spaces that carry chroma and so need converting for a CMYK press. */
 export function isRgbSpace(space: string): boolean {
   return /^(srgb|rgb|rgb16|rgba|adobe-?rgb|display-?p3|p3|scrgb|lab|cmc)$/i.test(space.trim());
@@ -145,6 +150,23 @@ export function assetChecks(ctx: PreflightContext): PreflightFinding[] {
             `estimate rather than a specified one — saturated brand colours in particular will not match.`,
           remedy:
             "Convert the image to CMYK in a colour-managed application, using the press's output profile, and re-upload it. Where the colour is brand-critical, have the ink values specified rather than converted.",
+          ...at(ctx, op.elementId, bounds),
+          measurements: { colorSpace: space, assetId: op.assetId },
+        }),
+      );
+    } else if (isCmykSpace(space) && !info.hasIccProfile) {
+      out.push(
+        finding({
+          code: "ASSET_RGB_IN_CMYK",
+          severity: "info",
+          title: "Placed CMYK image carries no embedded profile",
+          detail:
+            `Asset "${op.assetId}" is already ${space}, so no conversion happens at export — but with ` +
+            `no embedded ICC profile there is nothing recording WHICH CMYK it is. If it was separated ` +
+            `numerically from RGB rather than through the press's profile, the ink recipe is a guess ` +
+            `that happens to be stored in the right colour space.`,
+          remedy:
+            "Confirm with whoever produced the file which output profile it was separated for, and prefer vendor-separated artwork with the profile embedded for anything brand-critical.",
           ...at(ctx, op.elementId, bounds),
           measurements: { colorSpace: space, assetId: op.assetId },
         }),

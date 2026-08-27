@@ -19,12 +19,18 @@ import { DesignDocSchema } from "../src/lib/design/schema";
 const BRAND_DIR = path.join(process.cwd(), "public", "brand");
 
 const WANTED = [
-  { file: "full-color.png", role: "front" as const, grayscale: false },
+  // The identity package ships sRGB artwork. A production card is separated
+  // CMYK, so the front logo is converted here and the conversion is recorded on
+  // the asset: it is a numeric transform, not an ICC one, and preflight raises
+  // an INFO saying the separation is unverified until the brand supplies
+  // vendor-separated artwork. Converting silently and calling the result "CMYK"
+  // would be exactly the sort of quiet lie spec §14 forbids.
+  { file: "full-color.png", role: "front" as const, grayscale: false, cmyk: true },
   // The grayscale back is a genuinely grayscale asset, not a black-looking sRGB
   // one. Placing an sRGB file on a side costed for one plate is a real defect
   // and preflight says so, so the seed produces a file that passes rather than a
   // file that merely looks right.
-  { file: "full-black.png", role: "back" as const, grayscale: true },
+  { file: "full-black.png", role: "back" as const, grayscale: true, cmyk: false },
 ];
 
 async function main() {
@@ -44,18 +50,34 @@ async function main() {
     // 4, which pdf-lib expands to RGBA and embeds as DeviceRGB. Dropping the
     // alpha gives colour type 0, which embeds as DeviceGray — one plate, which
     // is what a black-and-white back is costed for.
+    // JPEG rather than PNG for the grayscale back: pdf-lib's PNG decoder always
+    // produces DeviceRGB, so a grayscale PNG would arrive at the press as three
+    // plates. A single-channel JPEG embeds as DeviceGray — one plate, which is
+    // what a black-and-white back is costed for.
     const bytes = w.grayscale
       ? new Uint8Array(
           await sharp(source)
             .flatten({ background: "#ffffff" })
             .toColourspace("b-w")
-            .png({ palette: false })
+            .jpeg({ quality: 94, chromaSubsampling: "4:4:4" })
             .toBuffer(),
         )
-      : new Uint8Array(source);
+      : w.cmyk
+        ? new Uint8Array(
+            await sharp(source)
+              .flatten({ background: "#ffffff" })
+              .toColourspace("cmyk")
+              .jpeg({ quality: 94, chromaSubsampling: "4:4:4" })
+              .toBuffer(),
+          )
+        : new Uint8Array(source);
     const meta = await sharp(Buffer.from(bytes)).metadata();
 
-    const filename = w.grayscale ? w.file.replace(/\.png$/, "-gray.png") : w.file;
+    const filename = w.grayscale
+      ? w.file.replace(/\.png$/, "-gray.jpg")
+      : w.cmyk
+        ? w.file.replace(/\.png$/, "-cmyk.jpg")
+        : w.file;
     const [existing] = await db
       .select()
       .from(assets)
@@ -67,13 +89,14 @@ async function main() {
       continue;
     }
 
-    const stored = await putAsset(org.id, filename, bytes, "image/png");
+    const contentType = w.cmyk || w.grayscale ? "image/jpeg" : "image/png";
+    const stored = await putAsset(org.id, filename, bytes, contentType);
     const id = nanoid(24);
     await db.insert(assets).values({
       id,
       orgId: org.id,
       filename,
-      contentType: "image/png",
+      contentType,
       byteSize: bytes.byteLength,
       storageKey: stored.key,
       storageUrl: stored.url,
@@ -85,7 +108,9 @@ async function main() {
       hasIccProfile: Boolean(meta.icc),
       sha256: stored.sha256,
       scanStatus: "skipped",
-      scanDetail: "Supplied brand artwork, loaded by scripts/seed-assets.ts.",
+      scanDetail: w.cmyk
+        ? "Supplied brand artwork, separated to CMYK numerically by scripts/seed-assets.ts. The separation is not ICC-managed; replace with vendor-separated artwork before a production run."
+        : "Supplied brand artwork, loaded by scripts/seed-assets.ts.",
     });
     ids[w.role] = id;
     console.log(`uploaded ${filename} (${meta.width}×${meta.height}, ${meta.space})`);

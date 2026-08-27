@@ -1,4 +1,3 @@
-import "server-only";
 import { and, eq, inArray } from "drizzle-orm";
 import {
   alternatePartNumbers,
@@ -11,7 +10,7 @@ import {
   productTranslations,
   products,
   warnings,
-} from "@/server/db";
+} from "@/server/db/client";
 import { emptyProductContext, type ProductContext } from "@/lib/data/context";
 
 /**

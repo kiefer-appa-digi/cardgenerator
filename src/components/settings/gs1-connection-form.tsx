@@ -37,8 +37,14 @@ const PROVIDER_NOTES: Record<(typeof GS1_PROVIDERS)[number], string> = {
 
 const AUTH_LABELS: Record<(typeof GS1_AUTH_MODES)[number], string> = {
   none: "None — the endpoint is open",
-  bearer: "Bearer token (Authorization header)",
+  bearer: "Bearer token",
   "api-key": "API key header",
+};
+
+const AUTH_NOTES: Record<(typeof GS1_AUTH_MODES)[number], string> = {
+  none: "No credential is sent. Nothing has to be stored below.",
+  bearer: "Sent as Authorization: Bearer <credential> on every request.",
+  "api-key": "Sent as the header named beside this, with the credential as its value.",
 };
 
 export type Gs1ConnectionView = {
@@ -179,7 +185,7 @@ export function Gs1ConnectionForm({
             />
           </Field>
 
-          <Field label="Authentication" htmlFor="authMode" hint={AUTH_LABELS[draft.authMode]}>
+          <Field label="Authentication" htmlFor="authMode" hint={AUTH_NOTES[draft.authMode]}>
             <Select
               id="authMode"
               value={draft.authMode}

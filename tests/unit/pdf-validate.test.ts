@@ -205,7 +205,8 @@ async function exportFixture(
       pixelWidth: px,
       pixelHeight: py,
       colorSpace: "gray",
-      contentType: "image/jpeg",
+      hasIccProfile: false,
+    contentType: "image/jpeg",
     });
     assetBytes = async () => ({ bytes: jpeg, contentType: "image/jpeg" });
   }
@@ -1064,7 +1065,8 @@ describe("crops are not clipping", () => {
           pixelWidth: px,
           pixelHeight: px,
           colorSpace: "gray",
-          contentType: "image/jpeg",
+          hasIccProfile: false,
+    contentType: "image/jpeg",
         },
       ],
     ]);

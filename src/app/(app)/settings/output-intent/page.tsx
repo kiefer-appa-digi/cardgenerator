@@ -52,7 +52,7 @@ export default async function OutputIntentPage() {
         }
       />
 
-      <div className="space-y-6 p-8">
+      <div className="max-w-4xl space-y-6 p-8">
         <Panel title={configured ? "What exports do now" : "What exports do without a profile"}>
           <div className="space-y-3 px-4 py-4 text-sm leading-relaxed text-ink-300">
             {configured ? (

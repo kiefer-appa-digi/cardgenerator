@@ -56,6 +56,12 @@ export type AssetInfo = {
   pixelHeight: number | null;
   colorSpace: string;
   contentType: string;
+  /**
+   * Whether the file carries an embedded ICC profile. A CMYK asset without one
+   * is in the right colour space but records nothing about WHICH CMYK, which is
+   * a different finding from an RGB asset that still needs converting.
+   */
+  hasIccProfile: boolean;
 };
 
 export type PlanInput = {

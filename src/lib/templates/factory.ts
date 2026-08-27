@@ -466,8 +466,13 @@ function buildBack(c: Ctx) {
   });
   const bcW = probe.ok ? probe.render.width : IN(1.469);
   const bcH = probe.ok ? probe.render.height : IN(1.2);
-  const bcX = safe.x;
-  const bcY = trim.y + trim.h - IN(0.22) - bcH;
+  // Inset from the safe edge rather than flush with it: the quiet-zone box is a
+  // rectangle, and a rectangle sitting exactly in the corner of the safe area
+  // pokes past the safe area's own arc. A barcode is the one element where that
+  // matters — a trimmed quiet zone is the commonest cause of a symbol that will
+  // not scan — so it is moved clear rather than argued with.
+  const bcX = safe.x + IN(0.06);
+  const bcY = trim.y + trim.h - IN(0.28) - bcH;
 
   const genuineH = IN(0.34);
   const fitH = IN(0.3);

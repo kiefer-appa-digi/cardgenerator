@@ -68,6 +68,7 @@ if (fs.existsSync(workbook)) {
   console.log(`\nno workbook at ${workbook}; skipping the catalogue import`);
 }
 
+run("npx", ["tsx", "scripts/seed-templates.ts"]);
 run("npx", ["tsx", "scripts/seed-assets.ts"]);
 
 console.log("\nBootstrap complete.");

@@ -177,7 +177,13 @@ export async function commitImportAction(importId: string) {
     };
   }
 
-  const report = await applyImportPlan(user.orgId, plan, importId);
+  const preview = (stash.report as { mapping?: { mappedFields?: string[] } }).mapping;
+  const report = await applyImportPlan(
+    user.orgId,
+    plan,
+    importId,
+    preview?.mappedFields ?? [],
+  );
 
   await db
     .update(imports)

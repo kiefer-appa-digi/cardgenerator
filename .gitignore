@@ -46,10 +46,11 @@ next-env.d.ts
 /ExportAllProducts_*.xlsx
 /MASTER_GAUNTLET_PRODUCT_CARD_DESIGNER.md
 .DS_Store
-/artifacts/
 /test-results/
 /playwright-report/
 /.vercel
 /.data/
-/artifacts/pdf/
 /*.mjs
+/artifacts/screens/
+/artifacts/renders/
+/artifacts/state.json

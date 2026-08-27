@@ -68,6 +68,12 @@ export async function applyImportPlan(
   orgId: string,
   plan: ImportPlan,
   importId: string,
+  /**
+   * Target field keys the mapping actually feeds. The plan itself does not carry
+   * the mapping, and the applier needs it to tell "this sheet says the fitment
+   * list is now empty" from "this sheet has no fitment column at all".
+   */
+  mappedFields: readonly string[] = [],
 ): Promise<ApplyReport> {
   const report: ApplyReport = {
     created: 0,
@@ -184,7 +190,50 @@ export async function applyImportPlan(
     };
 
     if (op.mode === "update" && op.existingId) {
-      updates.push({ id: op.existingId, values });
+      // An update writes ONLY the fields the mapping actually supplied.
+      //
+      // `values` above carries a default for every column, which is right for a
+      // new row and destructive for an existing one: re-importing the GS1 sheet,
+      // which has no country-of-origin column, would blank the country-of-origin
+      // statement somebody typed in. Erasing production copy is worse than
+      // getting it wrong, so an unmapped column leaves the stored value alone.
+      const supplied: Partial<typeof products.$inferInsert> = {
+        sourceImportId: importId,
+        sourceRow: op.sourceRow,
+        updatedAt: new Date(),
+      };
+      const carry = <K extends keyof typeof values>(key: K, field: string) => {
+        if (op.values[field] !== undefined) {
+          (supplied as Record<string, unknown>)[key as string] = values[key];
+        }
+      };
+      carry("partNumber", "product.partNumber");
+      carry("productName", "product.productName");
+      carry("description", "product.description");
+      carry("descriptionShort", "product.descriptionShort");
+      carry("labelDescription", "product.labelDescription");
+      carry("subtitle", "product.subtitle");
+      carry("countryOfOrigin", "product.countryOfOrigin");
+      carry("status", "product.status");
+      carry("packagingLevel", "product.packagingLevel");
+      carry("netContentCount", "product.netContentCount");
+      carry("netContentUom", "product.netContentUom");
+      carry("isPurchasable", "product.isPurchasable");
+      carry("isVariable", "product.isVariable");
+      carry("targetMarkets", "product.targetMarkets");
+      carry("gpcBrick", "product.gpcBrick");
+      carry("defaultPresetCode", "product.defaultPresetCode");
+      carry("lastModifiedSource", "product.lastModifiedSource");
+      // The part number falls back to the SKU, so it can be set even when the
+      // sheet has no part-number column of its own.
+      if (op.values["product.partNumber"] === undefined && partNumber) {
+        supplied.partNumber = partNumber;
+      }
+      if (values.brandId !== null) supplied.brandId = values.brandId;
+      if (Object.keys(op.custom).length > 0) supplied.custom = op.custom;
+      supplied.recordType = op.recordType;
+
+      updates.push({ id: op.existingId, values: supplied });
       refToProductId.set(op.ref, op.existingId);
       productIdsTouched.push(op.existingId);
       report.updated += 1;
@@ -221,12 +270,19 @@ export async function applyImportPlan(
       warningRows.push({ id: nanoid(24), orgId, productId, code: "", text, position: i }),
     );
   }
+  // Only clear a list the mapping actually feeds. A sheet with no fitment column
+  // has nothing to say about fitment, and "nothing to say" is not "delete it".
+  const clearFitments = mappedFields.includes("product.fitment");
+  const clearWarnings = mappedFields.includes("product.warning");
+  const clearAlternates = mappedFields.includes("alternate.partNumber");
   if (productIdsTouched.length) {
     for (let i = 0; i < productIdsTouched.length; i += CHUNK) {
       const slice = productIdsTouched.slice(i, i + CHUNK);
-      await db.delete(fitments).where(inArray(fitments.productId, slice));
-      await db.delete(warnings).where(inArray(warnings.productId, slice));
-      await db.delete(alternatePartNumbers).where(inArray(alternatePartNumbers.productId, slice));
+      if (clearFitments) await db.delete(fitments).where(inArray(fitments.productId, slice));
+      if (clearWarnings) await db.delete(warnings).where(inArray(warnings.productId, slice));
+      if (clearAlternates) {
+        await db.delete(alternatePartNumbers).where(inArray(alternatePartNumbers.productId, slice));
+      }
     }
   }
   await insertChunked(fitments, fitmentRows);

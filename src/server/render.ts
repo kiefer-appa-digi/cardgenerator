@@ -26,6 +26,7 @@ export async function loadAssetMap(orgId: string): Promise<Map<string, AssetInfo
         pixelHeight: a.pixelHeight,
         colorSpace: a.colorSpace,
         contentType: a.contentType,
+        hasIccProfile: a.hasIccProfile,
       } satisfies AssetInfo,
     ]),
   );

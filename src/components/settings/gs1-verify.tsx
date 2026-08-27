@@ -193,7 +193,7 @@ export function Gs1Verify({
           </div>
         </Panel>
 
-        <div className="space-y-6">
+        <div className="min-w-0 space-y-6">
           <Panel title="Check">
             <div className="space-y-4 p-4">
               {selectedProduct ? (

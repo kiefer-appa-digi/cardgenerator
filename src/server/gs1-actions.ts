@@ -435,7 +435,10 @@ export async function setGs1CredentialAction(
   const row = await ensureConnection(user.orgId);
   const replacing = row.credentialCiphertext !== "";
   const rotatedAt = new Date();
-  const keyVersion = row.keyVersion + 1;
+  // Version 1 is the first credential this connection has held; every
+  // replacement moves it on by one, so the number counts rotations rather than
+  // writes to the row.
+  const keyVersion = replacing ? row.keyVersion + 1 : 1;
 
   await db
     .update(gs1Connections)

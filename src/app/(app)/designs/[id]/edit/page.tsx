@@ -56,6 +56,7 @@ export default async function EditPage({ params }: PageProps<"/designs/[id]/edit
         pixelHeight: a.pixelHeight,
         colorSpace: a.colorSpace,
         contentType: a.contentType,
+        hasIccProfile: a.hasIccProfile,
         url: `/api/assets/${a.id}`,
       }))}
       status={design.status}

@@ -161,19 +161,19 @@ export default async function SettingsPage() {
                 label="Credential encryption"
                 value={
                   hasCredentialKey()
-                    ? "CREDENTIAL_KEY is set — connector credentials can be stored"
-                    : "CREDENTIAL_KEY is missing — connector credentials cannot be stored"
+                    ? "CREDENTIAL_KEY is set"
+                    : "CREDENTIAL_KEY is missing"
                 }
               />
               <DefRow
                 label="Asset storage"
-                value={storageMode() === "vercel-blob" ? "Vercel Blob, private" : "Local disk under .data/blob"}
+                value={storageMode() === "vercel-blob" ? "Vercel Blob, private" : "Local disk, .data/blob"}
               />
             </div>
             <div className="border-t border-ink-800/60 sm:border-l sm:border-t-0">
               <DefRow
                 label="Malware scanning"
-                value="No scanner configured — uploads record 'skipped'"
+                value="Not configured — uploads record “skipped”"
               />
               <DefRow
                 label="Audit trail"

@@ -249,7 +249,8 @@ function plansFor(presetCode: DesignDoc["presetCode"], opts: FixtureOptions = {}
       pixelWidth: 900,
       pixelHeight: 600,
       colorSpace: "srgb",
-      contentType: "image/png",
+      hasIccProfile: false,
+    contentType: "image/png",
     });
   }
   return planDocument({ doc: design(presetCode, opts), product: product(), assets });

@@ -161,7 +161,8 @@ function asset(id: string, extra: Partial<AssetInfo> = {}): [string, AssetInfo] 
       pixelWidth: 3000,
       pixelHeight: 4800,
       colorSpace: "cmyk",
-      contentType: "image/png",
+      hasIccProfile: false,
+    contentType: "image/png",
       ...extra,
     },
   ];

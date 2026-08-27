@@ -83,7 +83,7 @@ async function main() {
   });
 
   const plan = planImport(preview, { importId });
-  const report = await applyImportPlan(org.id, plan, importId);
+  const report = await applyImportPlan(org.id, plan, importId, mapping.mappedFields);
 
   await db
     .update(imports)

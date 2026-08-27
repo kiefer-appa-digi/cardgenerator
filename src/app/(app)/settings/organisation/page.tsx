@@ -36,7 +36,7 @@ export default async function OrganisationSettingsPage() {
         }
       />
 
-      <div className="space-y-6 p-8">
+      <div className="max-w-5xl space-y-6 p-8">
         <Panel
           title="In force now"
           description="What the preflight engine and the PDF writer actually use."

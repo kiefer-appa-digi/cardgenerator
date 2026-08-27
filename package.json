@@ -19,7 +19,9 @@
     "import:workbook": "tsx --env-file-if-exists=.env.local scripts/import-workbook.ts",
     "seed:benchmark": "tsx --env-file-if-exists=.env.local scripts/seed-benchmark.ts",
     "seed:assets": "tsx --env-file-if-exists=.env.local scripts/seed-assets.ts",
-    "bootstrap": "tsx scripts/bootstrap-remote.ts"
+    "bootstrap": "tsx scripts/bootstrap-remote.ts",
+    "seed:templates": "tsx --env-file-if-exists=.env.local scripts/seed-templates.ts",
+    "samples": "tsx --env-file-if-exists=.env.local scripts/generate-samples.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",
