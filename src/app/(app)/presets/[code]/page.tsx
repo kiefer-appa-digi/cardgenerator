@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { cardDesigns, cardPresets, cardTemplates, db, packageTypes } from "@/server/db";
 import { assertSameOrg, requireUser } from "@/server/auth/current";
 import { PageHeader, Panel, Badge, EmptyState } from "@/components/ui/panel";
@@ -80,12 +80,20 @@ export default async function PresetDetailPage({
     )
     .orderBy(asc(cardTemplates.name));
 
+  const DESIGN_LIMIT = 12;
   const designs = await db
     .select({ id: cardDesigns.id, name: cardDesigns.name, status: cardDesigns.status })
     .from(cardDesigns)
     .where(and(eq(cardDesigns.orgId, user.orgId), eq(cardDesigns.presetCode, upper)))
     .orderBy(asc(cardDesigns.name))
-    .limit(12);
+    .limit(DESIGN_LIMIT);
+
+  /** Counted separately so a truncated list can say so instead of implying it is all of them. */
+  const [designTotal] = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(cardDesigns)
+    .where(and(eq(cardDesigns.orgId, user.orgId), eq(cardDesigns.presetCode, upper)));
+  const designCount = designTotal?.n ?? designs.length;
 
   const conflicts = presetDiscrepancies().filter((d) => d.preset === upper);
   const safe = safeRect(p);
@@ -434,21 +442,34 @@ export default async function PresetDetailPage({
                       </Link>
                     </p>
                   ) : (
-                    <ul className="mt-1.5 space-y-1">
-                      {designs.map((d) => (
-                        <li key={d.id} className="flex items-center gap-2 text-sm">
-                          <Link
-                            href={`/designs/${d.id}`}
-                            className="min-w-0 truncate text-ink-200 hover:text-brand-300"
-                          >
-                            {d.name}
+                    <>
+                      <ul className="mt-1.5 space-y-1">
+                        {designs.map((d) => (
+                          <li key={d.id} className="flex items-center gap-2 text-sm">
+                            <Link
+                              href={`/designs/${d.id}`}
+                              className="min-w-0 truncate text-ink-200 hover:text-brand-300"
+                            >
+                              {d.name}
+                            </Link>
+                            <Badge tone={d.status === "approved" ? "ok" : "neutral"}>
+                              {d.status.replace("_", " ")}
+                            </Badge>
+                          </li>
+                        ))}
+                      </ul>
+                      {designCount > designs.length ? (
+                        <p className="mt-1.5 text-xs text-ink-400">
+                          <span className="numeric">
+                            {designs.length} of {designCount}
+                          </span>{" "}
+                          shown.{" "}
+                          <Link href="/designs" className="text-brand-300 hover:text-brand-200">
+                            All cards →
                           </Link>
-                          <Badge tone={d.status === "approved" ? "ok" : "neutral"}>
-                            {d.status.replace("_", " ")}
-                          </Badge>
-                        </li>
-                      ))}
-                    </ul>
+                        </p>
+                      ) : null}
+                    </>
                   )}
                 </div>
               </div>

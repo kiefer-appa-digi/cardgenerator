@@ -24,10 +24,13 @@ export type IdentifierRow = {
 export function IdentifiersPanel({
   identifiers,
   gtin14ForCard,
+  upcaForCard,
 }: {
   identifiers: IdentifierRow[];
-  /** The GTIN-14 a barcode on the card would encode, or null when none resolves. */
+  /** The GTIN-14 an ITF-14 or Digital Link would encode, or null when none resolves. */
   gtin14ForCard: string | null;
+  /** The UPC-A the front of the card would encode, or null when none resolves. */
+  upcaForCard: string | null;
 }) {
   const rows = [...identifiers].sort(
     (a, b) => identifierOrder(a.kind) - identifierOrder(b.kind) || a.value.localeCompare(b.value),
@@ -114,8 +117,9 @@ export function IdentifiersPanel({
                       </Badge>
                       {!agrees ? (
                         <p className="mt-1 max-w-xs text-[11px] leading-relaxed text-sev-warning">
-                          The import verdict and the current value disagree — the value changed
-                          after it was imported.
+                          The import verdict and the check recomputed now disagree. Either the
+                          value was edited after it was imported or it was imported under a
+                          different rule; the recomputed column is the one that governs the card.
                         </p>
                       ) : null}
                       {r.validationNote ? (
@@ -132,15 +136,30 @@ export function IdentifiersPanel({
         </div>
       )}
 
-      <div className="border-t border-ink-800 px-4 py-2.5">
+      {/* Two answers, because the retail symbol on the front and a GTIN-14
+          symbol are encoded from different values and one can exist without the
+          other. Stating only the GTIN-14 would promise a scannable card for a
+          variable-measure product whose UPC-A element preflight will reject. */}
+      <div className="space-y-1 border-t border-ink-800 px-4 py-2.5">
+        {upcaForCard ? (
+          <p className="text-[11px] text-ink-400">
+            The UPC-A on the front encodes{" "}
+            <span className="numeric text-ink-200">{upcaForCard}</span>.
+          </p>
+        ) : (
+          <p className="text-[11px] text-sev-warning">
+            No held identifier is a UPC-A, so the retail symbol on the front cannot be drawn.
+          </p>
+        )}
         {gtin14ForCard ? (
           <p className="text-[11px] text-ink-400">
-            A barcode on this card encodes GTIN-14{" "}
+            A GTIN-14 symbol — ITF-14 or a GS1 Digital Link QR — encodes{" "}
             <span className="numeric text-ink-200">{gtin14ForCard}</span>.
           </p>
         ) : (
           <p className="text-[11px] text-sev-warning">
-            No held identifier normalises to a GTIN-14, so no barcode can be encoded.
+            No held identifier normalises to a GTIN-14 either, so no barcode of any symbology can
+            be encoded.
           </p>
         )}
       </div>

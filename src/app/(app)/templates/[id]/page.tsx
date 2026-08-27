@@ -75,7 +75,10 @@ export default async function TemplateDetailPage({ params }: PageProps<"/templat
   const preset = CARD_PRESETS[tpl.presetCode as CardPresetDef["code"]];
   const parsed = DesignDocSchema.safeParse(tpl.doc);
 
-  const header = (
+  // `canStart` is false for a document that no longer parses: the panel below
+  // says no card can be started from it, and offering the button anyway would
+  // only produce the same refusal from the server action.
+  const header = (canStart: boolean) => (
     <PageHeader
       title={tpl.name}
       description={tpl.description || "No description recorded for this template."}
@@ -84,7 +87,7 @@ export default async function TemplateDetailPage({ params }: PageProps<"/templat
           {canWrite ? (
             <DuplicateTemplateButton templateId={tpl.id} size="md" variant="outline" />
           ) : null}
-          {canDesign ? (
+          {canDesign && canStart ? (
             <StartCardButton
               templateId={tpl.id}
               presetCode={tpl.presetCode}
@@ -118,7 +121,7 @@ export default async function TemplateDetailPage({ params }: PageProps<"/templat
   if (!parsed.success) {
     return (
       <>
-        {header}
+        {header(false)}
         <div className="p-8">
           <Panel title="This template no longer validates">
             <div className="space-y-2 px-4 py-4">
@@ -169,7 +172,7 @@ export default async function TemplateDetailPage({ params }: PageProps<"/templat
 
   return (
     <>
-      {header}
+      {header(true)}
 
       <div className="space-y-6 p-8">
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">

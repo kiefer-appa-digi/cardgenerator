@@ -162,8 +162,10 @@ function buildFront(c: Ctx) {
       [{ binding: bind("partNumber", { transform: "uppercase" }) }],
       {
         name: "Part number",
-        fontFamily: "Archivo",
-        fontWeight: 800,
+        // Oswald: condensed enough that a long part number stays large, with
+        // proper lining numerals. This is the element read from three feet away.
+        fontFamily: "Oswald",
+        fontWeight: 700,
         fontSize: Math.round(partH * 0.78),
         lineHeight: 10_500,
         color: cmykPct(0, 0, 0, 100),
@@ -184,9 +186,11 @@ function buildFront(c: Ctx) {
       [{ binding: bind("productName", { fallback: "", transform: "uppercase" }) }],
       {
         name: "Product title",
-        fontFamily: "Archivo",
-        fontWeight: 700,
-        fontSize: Math.round(titleH * 0.33),
+        // Bebas Neue has no lowercase — every glyph is a cap — so this block is
+        // uppercase by construction, which is what the title wants anyway.
+        fontFamily: "Bebas Neue",
+        fontWeight: 400,
+        fontSize: Math.round(titleH * 0.40),
         lineHeight: 11_000,
         color: cmykPct(78, 20, 0, 0),
         required: true,
@@ -362,8 +366,10 @@ function buildBack(c: Ctx) {
       [{ binding: bind("partNumber", { transform: "uppercase" }) }],
       {
         name: "Part number",
-        fontFamily: "Archivo",
-        fontWeight: 800,
+        // Oswald: condensed enough that a long part number stays large, with
+        // proper lining numerals. This is the element read from three feet away.
+        fontFamily: "Oswald",
+        fontWeight: 700,
         fontSize: Math.round(logoH * 0.62),
         color: K,
         align: "right",
@@ -505,8 +511,8 @@ function buildBack(c: Ctx) {
       frame: { x: safe.x, y: bomTop, w: W, h: bomH },
       heading: "THIS PACK INCLUDES:",
       showHeading: true,
-      headingFontSize: IN(0.095),
-      headingFontWeight: 800,
+      headingFontSize: IN(0.1),
+      headingFontWeight: 600,
       fontFamily: "Barlow Condensed",
       fontWeight: 500,
       fontSize: IN(0.085),

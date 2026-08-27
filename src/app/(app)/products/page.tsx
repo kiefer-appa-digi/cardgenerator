@@ -126,8 +126,15 @@ export default async function ProductsPage(props: PageProps<"/products">) {
     .leftJoin(gtin, and(eq(gtin.productId, products.id), eq(gtin.kind, "gtin14")))
     .where(where)
     // Four records carry no part number at all; they sort last rather than
-    // occupying the top of the first page.
-    .orderBy(sql`nullif(products.part_number, '') asc nulls last`, asc(products.description))
+    // occupying the top of the first page. `id` is the final tiebreaker so the
+    // order is total: LIMIT/OFFSET over a partial order lets Postgres return a
+    // row on two pages and skip another, and part number is not unique here —
+    // 12-805 exists twice.
+    .orderBy(
+      sql`nullif(products.part_number, '') asc nulls last`,
+      asc(products.description),
+      asc(products.id),
+    )
     .limit(PAGE_SIZE)
     .offset((page - 1) * PAGE_SIZE);
 
@@ -199,7 +206,10 @@ export default async function ProductsPage(props: PageProps<"/products">) {
             label="Carry a UPC"
             value={totals?.withUpc ?? 0}
             tone={(totals?.withUpc ?? 0) === (totals?.total ?? 0) ? "ok" : "warning"}
-            sub={`${(totals?.total ?? 0) - (totals?.withUpc ?? 0)} cannot be barcoded`}
+            // Not "cannot be barcoded": a product with only a variable-measure
+            // GTIN-14 still carries an ITF-14 or a Digital Link. What it cannot
+            // carry is the retail symbol, which is the narrower, true claim.
+            sub={`${(totals?.total ?? 0) - (totals?.withUpc ?? 0)} cannot carry a UPC-A`}
           />
           <Stat
             label="Country of origin"
@@ -287,7 +297,10 @@ export default async function ProductsPage(props: PageProps<"/products">) {
                         key={p.id}
                         className="border-b border-ink-800/60 last:border-0 hover:bg-ink-800/30"
                       >
-                        <th scope="row" className="px-4 py-2.5 text-left font-normal">
+                        <th
+                          scope="row"
+                          className="px-4 py-2.5 text-left font-normal whitespace-nowrap"
+                        >
                           <Link
                             href={`/products/${p.id}`}
                             className="numeric font-medium text-ink-100 hover:text-brand-300"

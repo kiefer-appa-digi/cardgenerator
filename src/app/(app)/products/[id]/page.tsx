@@ -23,7 +23,7 @@ import { Field, FieldGrid } from "@/components/product/fields";
 import { IdentifiersPanel } from "@/components/product/identifiers-panel";
 import { ReadinessPanel } from "@/components/product/readiness-panel";
 import { SourceRow } from "@/components/product/source-row";
-import { canonicalGtin14 } from "@/components/product/identifier-check";
+import { canonicalGtin14, canonicalUpcA } from "@/components/product/identifier-check";
 import { evaluateReadiness } from "@/components/product/readiness";
 import { CARD_PRESETS } from "@/lib/geometry/presets";
 import { formatLength } from "@/lib/units";
@@ -90,7 +90,12 @@ export default async function ProductPage({ params }: PageProps<"/products/[id]"
         .from(productTranslations)
         .where(eq(productTranslations.productId, product.id))
         .orderBy(asc(productTranslations.locale), asc(productTranslations.field)),
-      db.select().from(boms).where(eq(boms.productId, product.id)),
+      // Ordered so the pack-contents blocks do not swap places between views.
+      db
+        .select()
+        .from(boms)
+        .where(eq(boms.productId, product.id))
+        .orderBy(asc(boms.name), asc(boms.id)),
       db
         .select({
           id: cardDesigns.id,
@@ -184,8 +189,12 @@ export default async function ProductPage({ params }: PageProps<"/products/[id]"
             <Link href="/products">
               <Button variant="ghost">All products</Button>
             </Link>
+            {/* Not "from this product": /designs/new takes no product
+                parameter, so the product is chosen there. Labelling the button
+                as though the choice were already made would be a promise the
+                next screen does not keep. */}
             <Link href="/designs/new">
-              <Button variant="primary">New card from this product</Button>
+              <Button variant="primary">New card</Button>
             </Link>
           </>
         }
@@ -241,7 +250,16 @@ export default async function ProductPage({ params }: PageProps<"/products/[id]"
                   }
                   numeric
                 />
-                <Field label="Brand" value={brand?.name ?? ""} hint={brand?.legalName || undefined} />
+                <Field
+                  label="Brand"
+                  value={brand?.name ?? ""}
+                  // Only when it says something the name does not: most brands
+                  // record the trading name in both columns, and printing it
+                  // twice reads as a rendering fault rather than as provenance.
+                  hint={brand && brand.legalName && brand.legalName !== brand.name
+                    ? brand.legalName
+                    : undefined}
+                />
                 <Field label="Source last modified" value={product.lastModifiedSource} numeric />
               </FieldGrid>
               {brand?.statement ? (
@@ -266,13 +284,17 @@ export default async function ProductPage({ params }: PageProps<"/products/[id]"
                 validationNote: i.validationNote,
               }))}
               gtin14ForCard={canonicalGtin14([gtin14, gtin13, upc])}
+              upcaForCard={canonicalUpcA([upc, gtin13, gtin14])}
             />
 
             <Panel
               title="Pack contents"
               description="The repeating block on the back of a kit card."
             >
-              {items.length === 0 ? (
+              {/* On bomRows, not on items: a BOM that exists with no lines is a
+                  different fact from no BOM at all, and it is reported below
+                  rather than hidden behind "nothing is recorded". */}
+              {bomRows.length === 0 ? (
                 <EmptyState
                   title="No bill of materials"
                   description="Nothing is recorded for what is inside the pack, so the pack-contents block collapses to nothing. A single-item pack legitimately has none; a kit needs its lines mapped from the pack-contents sheet at import."
@@ -285,80 +307,92 @@ export default async function ProductPage({ params }: PageProps<"/products/[id]"
                   }
                 />
               ) : (
-                <>
-                  {bomRows.map((b) => (
-                    <div
-                      key={b.id}
-                      className="flex flex-wrap items-baseline gap-2 border-b border-ink-800 px-4 py-2"
-                    >
-                      <span className="text-[13px] text-ink-200">{b.name}</span>
-                      {b.revision ? (
-                        <span className="numeric text-[11px] text-ink-500">
-                          revision {b.revision}
+                // One table per bill of materials, rather than every line in a
+                // single run under a stack of headings: a product may carry more
+                // than one, they are ordered by line position independently, and
+                // a merged table would number the second BOM's first line 6 and
+                // give no way to tell which pack a line belongs to.
+                bomRows.map((b) => {
+                  const lines = items.filter((i) => i.bomId === b.id);
+                  return (
+                    <div key={b.id} className="border-b border-ink-800 last:border-0">
+                      <div className="flex flex-wrap items-baseline gap-2 border-b border-ink-800 px-4 py-2">
+                        <span className="text-[13px] text-ink-200">{b.name}</span>
+                        {b.revision ? (
+                          <span className="numeric text-[11px] text-ink-500">
+                            revision {b.revision}
+                          </span>
+                        ) : null}
+                        <span className="numeric ml-auto text-[11px] text-ink-500">
+                          {lines.length} {lines.length === 1 ? "line" : "lines"}
                         </span>
-                      ) : null}
-                      <span className="numeric ml-auto text-[11px] text-ink-500">
-                        {items.filter((i) => i.bomId === b.id).length} lines
-                      </span>
+                      </div>
+                      {lines.length === 0 ? (
+                        <p className="px-4 py-3 text-[13px] leading-relaxed text-ink-400">
+                          This bill of materials exists but holds no lines, so the pack-contents
+                          block on the back still resolves to nothing.
+                        </p>
+                      ) : (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-sm">
+                            <thead>
+                              <tr className="border-b border-ink-800 text-left text-[11px] uppercase tracking-wider text-ink-400">
+                                <th scope="col" className="px-4 py-2 font-medium">
+                                  #
+                                </th>
+                                <th scope="col" className="px-4 py-2 text-right font-medium">
+                                  Qty
+                                </th>
+                                <th scope="col" className="px-4 py-2 font-medium">
+                                  UoM
+                                </th>
+                                <th scope="col" className="px-4 py-2 font-medium">
+                                  Component
+                                </th>
+                                <th scope="col" className="px-4 py-2 font-medium">
+                                  Part number
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {lines.map((i, index) => (
+                                <tr key={i.id} className="border-b border-ink-800/60 last:border-0">
+                                  <td className="numeric px-4 py-2 text-ink-500">{index + 1}</td>
+                                  <td className="numeric px-4 py-2 text-right text-ink-100">
+                                    {i.quantity}
+                                  </td>
+                                  <td className="px-4 py-2 text-ink-400">{i.unitOfMeasure}</td>
+                                  <td className="px-4 py-2 text-ink-200">
+                                    {i.name || <span className="text-ink-600">unnamed</span>}
+                                    {i.description ? (
+                                      <span className="ml-2 text-[11px] text-ink-500">
+                                        {i.description}
+                                      </span>
+                                    ) : null}
+                                  </td>
+                                  <td className="numeric px-4 py-2 whitespace-nowrap">
+                                    {i.componentId ? (
+                                      <Link
+                                        href={`/products/${i.componentId}`}
+                                        className="text-brand-300 hover:text-brand-200"
+                                      >
+                                        {i.componentPartNumber || i.partNumber}
+                                      </Link>
+                                    ) : i.partNumber ? (
+                                      <span className="text-ink-300">{i.partNumber}</span>
+                                    ) : (
+                                      <span className="text-ink-600">—</span>
+                                    )}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
                     </div>
-                  ))}
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="border-b border-ink-800 text-left text-[11px] uppercase tracking-wider text-ink-400">
-                          <th scope="col" className="px-4 py-2 font-medium">
-                            #
-                          </th>
-                          <th scope="col" className="px-4 py-2 text-right font-medium">
-                            Qty
-                          </th>
-                          <th scope="col" className="px-4 py-2 font-medium">
-                            UoM
-                          </th>
-                          <th scope="col" className="px-4 py-2 font-medium">
-                            Component
-                          </th>
-                          <th scope="col" className="px-4 py-2 font-medium">
-                            Part number
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {items.map((i, index) => (
-                          <tr key={i.id} className="border-b border-ink-800/60 last:border-0">
-                            <td className="numeric px-4 py-2 text-ink-500">{index + 1}</td>
-                            <td className="numeric px-4 py-2 text-right text-ink-100">
-                              {i.quantity}
-                            </td>
-                            <td className="px-4 py-2 text-ink-400">{i.unitOfMeasure}</td>
-                            <td className="px-4 py-2 text-ink-200">
-                              {i.name || <span className="text-ink-600">unnamed</span>}
-                              {i.description ? (
-                                <span className="ml-2 text-[11px] text-ink-500">
-                                  {i.description}
-                                </span>
-                              ) : null}
-                            </td>
-                            <td className="numeric px-4 py-2">
-                              {i.componentId ? (
-                                <Link
-                                  href={`/products/${i.componentId}`}
-                                  className="text-brand-300 hover:text-brand-200"
-                                >
-                                  {i.componentPartNumber || i.partNumber}
-                                </Link>
-                              ) : i.partNumber ? (
-                                <span className="text-ink-300">{i.partNumber}</span>
-                              ) : (
-                                <span className="text-ink-600">—</span>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </>
+                  );
+                })
               )}
             </Panel>
 
@@ -396,13 +430,23 @@ export default async function ProductPage({ params }: PageProps<"/products/[id]"
               {designs.length === 0 ? (
                 <EmptyState
                   title="No card yet"
-                  description="Nothing has been designed for this product. A new card starts from a dieline and a master template, with this product's data already bound to it."
+                  description={
+                    // The new-card screen lists only record_type = "product",
+                    // so for anything else the button would lead to a list this
+                    // record is not in. Say that here rather than let the
+                    // operator hunt for it.
+                    product.recordType === "product"
+                      ? "Nothing has been designed for this product. A new card starts from a dieline and a master template; choose this product on the new-card screen and its data binds to the template."
+                      : `Nothing has been designed for this record, and the new-card screen offers only records of type “product” — this one is “${product.recordType.replace("_", " ")}”, a component of other packs rather than something that ships in a card of its own.`
+                  }
                   action={
-                    <Link href="/designs/new">
-                      <Button variant="primary" size="sm">
-                        New card from this product
-                      </Button>
-                    </Link>
+                    product.recordType === "product" ? (
+                      <Link href="/designs/new">
+                        <Button variant="primary" size="sm">
+                          New card
+                        </Button>
+                      </Link>
+                    ) : undefined
                   }
                 />
               ) : (

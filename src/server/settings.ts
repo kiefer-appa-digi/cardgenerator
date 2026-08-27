@@ -5,7 +5,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { revalidatePath } from "next/cache";
 import { db, organizations, users } from "@/server/db";
-import { requireCapability, requireUser } from "@/server/auth/current";
+import { requireCapability } from "@/server/auth/current";
 import { audit } from "@/server/audit";
 import { checkPasswordStrength, hashPassword } from "@/server/auth/password";
 import { BlackRulesSchema, OutputIntentSchema } from "@/lib/color/types";
@@ -29,14 +29,13 @@ import { ROLES } from "@/server/db/schema";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
-const SETTINGS_BRANCHES = [
-  "blackRules",
-  "preflightProfile",
-  "outputIntent",
-  "outputIntentMeta",
-  "exportPolicy",
-] as const;
-type SettingsBranch = (typeof SETTINGS_BRANCHES)[number];
+/** The branches this file owns. Anything else in the blob is left untouched. */
+type SettingsBranch =
+  | "blackRules"
+  | "preflightProfile"
+  | "outputIntent"
+  | "outputIntentMeta"
+  | "exportPolicy";
 
 async function readSettings(orgId: string): Promise<Record<string, unknown>> {
   const [org] = await db
@@ -404,27 +403,4 @@ export async function setUserActiveAction(input: unknown): Promise<ActionResult>
 
   revalidatePath("/settings/users");
   return { ok: true };
-}
-
-/**
- * Read-only summary for the settings overview. Kept here so the page does not
- * have to know which branch of the settings blob each number lives in.
- */
-export async function settingsOverviewAction(): Promise<{
-  profileName: string;
-  totalAreaCoverageLimit: number;
-  outputIntentConfigured: boolean;
-  conditionName: string;
-}> {
-  const user = await requireUser();
-  const settings = await readSettings(user.orgId);
-  const blackRules = BlackRulesSchema.parse((settings.blackRules as object) ?? {});
-  const intent = OutputIntentSchema.parse((settings.outputIntent as object) ?? {});
-  const profile = PreflightProfileSchema.parse((settings.preflightProfile as object) ?? {});
-  return {
-    profileName: profile.name,
-    totalAreaCoverageLimit: blackRules.totalAreaCoverageLimit,
-    outputIntentConfigured: Boolean(intent.iccBase64),
-    conditionName: intent.conditionName,
-  };
 }

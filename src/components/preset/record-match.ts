@@ -58,13 +58,20 @@ export function geometryMismatches(
   const out: GeometryMismatch[] = [];
   for (const [field, key, expected] of pairs(p)) {
     const stored = row[key];
-    if (stored !== expected) {
-      out.push({
-        field,
-        expected: `${formatLength(expected, "in")} in`,
-        stored: `${formatLength(stored, "in")} in`,
-      });
-    }
+    if (stored === expected) continue;
+    const a = formatLength(expected, "in");
+    const b = formatLength(stored, "in");
+    /**
+     * A disagreement finer than the fifth decimal still matters — the exporter
+     * uses the integer, not the printed inches — so when the two round to the
+     * same string the raw µpt is shown rather than two identical numbers.
+     */
+    const exact = a === b;
+    out.push({
+      field,
+      expected: exact ? `${a} in (${expected} µpt)` : `${a} in`,
+      stored: exact ? `${b} in (${stored} µpt)` : `${b} in`,
+    });
   }
   return out;
 }

@@ -101,6 +101,10 @@ export function evaluateReadiness(input: ReadinessInput): ReadinessCheck[] {
 
   /* ---------------------------------------------------------- pack contents */
   const hasBom = input.bomCount > 0 && input.bomItemCount > 0;
+  // An empty bill of materials is not the same fact as no bill of materials:
+  // the first means the pack-contents columns were mapped and matched nothing,
+  // which is an import to look at, and the second may be entirely correct.
+  const emptyBom = input.bomCount > 0 && input.bomItemCount === 0;
   checks.push({
     key: "bom",
     label: "Pack contents",
@@ -108,10 +112,14 @@ export function evaluateReadiness(input: ReadinessInput): ReadinessCheck[] {
     ok: hasBom,
     problem: hasBom
       ? ""
-      : "No bill of materials. The pack-contents block on the back resolves to nothing and collapses; a single-item pack legitimately has none.",
+      : emptyBom
+        ? "A bill of materials is recorded but holds no lines, so the pack-contents block on the back still resolves to nothing. Either the pack-contents rows did not match this part number at import, or the pack genuinely has no components."
+        : "No bill of materials. The pack-contents block on the back resolves to nothing and collapses; a single-item pack legitimately has none.",
     evidence: hasBom
       ? `${input.bomItemCount} ${input.bomItemCount === 1 ? "line" : "lines"}`
-      : "not recorded",
+      : emptyBom
+        ? "recorded, no lines"
+        : "not recorded",
     remedy: hasBom ? undefined : IMPORT_REMEDY,
   });
 

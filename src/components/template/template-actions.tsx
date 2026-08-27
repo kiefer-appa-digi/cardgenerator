@@ -27,12 +27,22 @@ export function EnsureMasterTemplatesButton({
   const router = useRouter();
   const [pending, start] = useTransition();
   const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
 
   const run = () => {
     setError(null);
+    setNote(null);
     start(async () => {
       try {
-        await ensureMasterTemplatesAction();
+        const res = await ensureMasterTemplatesAction();
+        // The action is idempotent on the template NAME, so it can legitimately
+        // create nothing — an archived or renamed master still holds the name.
+        // Saying so beats a button that appears to do nothing.
+        if (res.created.length === 0) {
+          setNote(
+            "Nothing was created: a template already holds each master name. An archived or renamed master still occupies it.",
+          );
+        }
         router.refresh();
       } catch (e) {
         setError(e instanceof Error ? e.message : "The master templates could not be created.");
@@ -53,6 +63,11 @@ export function EnsureMasterTemplatesButton({
       {error ? (
         <p role="alert" className="text-[11px] text-flag-200">
           {error}
+        </p>
+      ) : null}
+      {note ? (
+        <p role="status" className="max-w-sm text-[11px] leading-relaxed text-sev-warning">
+          {note}
         </p>
       ) : null}
     </div>

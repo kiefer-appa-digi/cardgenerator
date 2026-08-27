@@ -585,8 +585,13 @@ const VerifyInputSchema = z.object({
   gtin: z.string().trim().max(24).optional(),
 });
 
+/**
+ * Drop the provider's raw payload before the record goes to a browser. It is
+ * kept on the sync record for diagnosis; the screen only needs mapped fields.
+ */
 function stripRaw(record: Gs1ProductRecord): Omit<Gs1ProductRecord, "raw"> {
-  const { raw: _raw, ...rest } = record;
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- rest-omit: `raw` exists only to be discarded.
+  const { raw, ...rest } = record;
   return rest;
 }
 
@@ -703,7 +708,8 @@ export async function verifyProductGtinAction(
     },
   });
 
-  const { record: _dropped, ...verifySummary } = verified.value;
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- rest-omit: the record travels separately, stripped of `raw`.
+  const { record: nested, ...verifySummary } = verified.value;
 
   return {
     ok: true,
@@ -951,45 +957,6 @@ export async function acceptGs1FieldsAction(input: unknown): Promise<
   return { ok: true, applied, rejected };
 }
 
-/** Recent verification history for one product, for the verify screen. */
-export async function recentGs1SyncsAction(productId: string): Promise<
-  Array<{
-    id: string;
-    gtin: string;
-    status: string;
-    operation: string;
-    acceptedFields: string[];
-    createdAt: string;
-    error: string;
-  }>
-> {
-  const user = await requireCapability("gs1.read");
-  const rows = await db
-    .select({
-      id: gs1SyncRecords.id,
-      gtin: gs1SyncRecords.gtin,
-      status: gs1SyncRecords.status,
-      operation: gs1SyncRecords.operation,
-      acceptedFields: gs1SyncRecords.acceptedFields,
-      createdAt: gs1SyncRecords.createdAt,
-      error: gs1SyncRecords.error,
-    })
-    .from(gs1SyncRecords)
-    .where(and(eq(gs1SyncRecords.orgId, user.orgId), eq(gs1SyncRecords.productId, productId)))
-    .orderBy(desc(gs1SyncRecords.createdAt))
-    .limit(10);
-
-  return rows.map((r) => ({
-    id: r.id,
-    gtin: r.gtin,
-    status: r.status,
-    operation: r.operation,
-    acceptedFields: Array.isArray(r.acceptedFields) ? (r.acceptedFields as string[]) : [],
-    createdAt: r.createdAt.toISOString(),
-    error: r.error,
-  }));
-}
-
 /* ------------------------------------------------------------- read model */
 
 export type Gs1SettingsView = {
@@ -1011,6 +978,18 @@ export type Gs1SettingsView = {
     keyAvailable: boolean;
   };
   lastTest: { at: string | null; ok: boolean; detail: string };
+  /** Recent verifications and what was accepted from each — spec §13A's paper trail. */
+  syncs: Array<{
+    id: string;
+    gtin: string;
+    partNumber: string;
+    productId: string;
+    operation: string;
+    status: string;
+    acceptedFields: string[];
+    error: string;
+    createdAt: string;
+  }>;
   logs: Array<{
     id: string;
     method: string;
@@ -1043,6 +1022,24 @@ export async function gs1SettingsViewAction(): Promise<Gs1SettingsView> {
     .orderBy(desc(gs1RequestLogs.createdAt))
     .limit(50);
 
+  const syncs = await db
+    .select({
+      id: gs1SyncRecords.id,
+      gtin: gs1SyncRecords.gtin,
+      productId: gs1SyncRecords.productId,
+      partNumber: products.partNumber,
+      operation: gs1SyncRecords.operation,
+      status: gs1SyncRecords.status,
+      acceptedFields: gs1SyncRecords.acceptedFields,
+      error: gs1SyncRecords.error,
+      createdAt: gs1SyncRecords.createdAt,
+    })
+    .from(gs1SyncRecords)
+    .leftJoin(products, eq(products.id, gs1SyncRecords.productId))
+    .where(eq(gs1SyncRecords.orgId, user.orgId))
+    .orderBy(desc(gs1SyncRecords.createdAt))
+    .limit(10);
+
   return {
     connection: {
       provider: Gs1ProviderSchema.catch("disabled").parse(row?.provider ?? "disabled"),
@@ -1065,6 +1062,17 @@ export async function gs1SettingsViewAction(): Promise<Gs1SettingsView> {
       ok: row?.lastTestOk ?? false,
       detail: row?.lastTestDetail ?? "",
     },
+    syncs: syncs.map((s) => ({
+      id: s.id,
+      gtin: s.gtin,
+      productId: s.productId,
+      partNumber: s.partNumber ?? "",
+      operation: s.operation,
+      status: s.status,
+      acceptedFields: Array.isArray(s.acceptedFields) ? (s.acceptedFields as string[]) : [],
+      error: s.error,
+      createdAt: s.createdAt.toISOString(),
+    })),
     logs: logs.map((l) => ({
       id: l.id,
       method: l.method,

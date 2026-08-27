@@ -87,6 +87,12 @@
 @font-face { font-family: "Barlow Condensed"; src: url("/fonts/BarlowCondensed-500.ttf") format("truetype"); font-weight: 500; font-style: normal; font-display: block; }
 @font-face { font-family: "Barlow Condensed"; src: url("/fonts/BarlowCondensed-600.ttf") format("truetype"); font-weight: 600; font-style: normal; font-display: block; }
 @font-face { font-family: "Barlow Condensed"; src: url("/fonts/BarlowCondensed-700.ttf") format("truetype"); font-weight: 700; font-style: normal; font-display: block; }
+@font-face { font-family: "Oswald"; src: url("/fonts/Oswald-300.ttf") format("truetype"); font-weight: 300; font-style: normal; font-display: block; }
+@font-face { font-family: "Oswald"; src: url("/fonts/Oswald-400.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: block; }
+@font-face { font-family: "Oswald"; src: url("/fonts/Oswald-500.ttf") format("truetype"); font-weight: 500; font-style: normal; font-display: block; }
+@font-face { font-family: "Oswald"; src: url("/fonts/Oswald-600.ttf") format("truetype"); font-weight: 600; font-style: normal; font-display: block; }
+@font-face { font-family: "Oswald"; src: url("/fonts/Oswald-700.ttf") format("truetype"); font-weight: 700; font-style: normal; font-display: block; }
+@font-face { font-family: "Bebas Neue"; src: url("/fonts/BebasNeue-400.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: block; }
 
 :root {
   color-scheme: dark;

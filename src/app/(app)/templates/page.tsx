@@ -70,7 +70,14 @@ export default async function TemplatesPage() {
       />
 
       <div className="space-y-6 p-8">
-        <Panel>
+        <Panel
+          title={rows.length ? "Library" : undefined}
+          description={
+            rows.length
+              ? "Front and Back are element counts; Cards is how many cards were started from the template."
+              : undefined
+          }
+        >
           {rows.length === 0 ? (
             <EmptyState
               title="No templates yet"
@@ -86,6 +93,10 @@ export default async function TemplatesPage() {
               }
             />
           ) : (
+            // The row carries two buttons and a nowrap dieline size, so the
+            // table scrolls inside the panel rather than pushing the page
+            // sideways and cutting the actions off at a narrow window.
+            <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-ink-800 text-left text-[11px] uppercase tracking-wider text-ink-400">
@@ -98,13 +109,13 @@ export default async function TemplatesPage() {
                   <th scope="col" className="px-4 py-2 font-medium">
                     Brand
                   </th>
-                  <th scope="col" className="px-4 py-2 text-right font-medium">
+                  <th scope="col" className="px-4 py-2 text-right font-medium" title="Elements on the front">
                     Front
                   </th>
-                  <th scope="col" className="px-4 py-2 text-right font-medium">
+                  <th scope="col" className="px-4 py-2 text-right font-medium" title="Elements on the back">
                     Back
                   </th>
-                  <th scope="col" className="px-4 py-2 text-right font-medium">
+                  <th scope="col" className="px-4 py-2 text-right font-medium" title="Cards started from this template">
                     Cards
                   </th>
                   <th scope="col" className="px-4 py-2 font-medium">
@@ -175,6 +186,7 @@ export default async function TemplatesPage() {
                 })}
               </tbody>
             </table>
+            </div>
           )}
         </Panel>
 

@@ -83,12 +83,21 @@ export default async function ExportsPage() {
   const productionCount = jobs.filter((j) => j.kind === "production").length;
   const failedCount = jobs.filter((j) => j.status === "failed").length;
   const overrideCount = jobs.filter((j) => j.overrideNote).length;
+  // A run that finished and still wrote a file its own post-export check
+  // rejected is not a clean run, and a green zero next to a "check failed"
+  // badge in the table below would say it was.
+  const invalidFileCount = jobs.filter((j) =>
+    (byJob.get(j.id) ?? []).some((f) => f.status === "invalid"),
+  ).length;
+  const problemCount = jobs.filter(
+    (j) => j.status === "failed" || (byJob.get(j.id) ?? []).some((f) => f.status === "invalid"),
+  ).length;
 
   return (
     <>
       <PageHeader
         title="Exports"
-        description="Every proof and every production run, with the manifest it wrote and the checks the file was put through after it was written."
+        description="Every proof, production and batch run, with the manifest it wrote and the checks the file was put through after it was written."
         actions={
           <Link href="/designs">
             <Button variant="primary">Go to cards</Button>
@@ -102,9 +111,10 @@ export default async function ExportsPage() {
             <Stat label="Jobs" value={jobs.length} sub="Most recent 100" />
             <Stat label="Production runs" value={productionCount} />
             <Stat
-              label="Failed"
-              value={failedCount}
-              tone={failedCount ? "danger" : "ok"}
+              label="Runs with a problem"
+              value={problemCount}
+              tone={problemCount ? "danger" : "ok"}
+              sub={`${failedCount} errored · ${invalidFileCount} wrote a file that failed its check`}
             />
             <Stat
               label="Blocking overrides"
@@ -127,6 +137,7 @@ export default async function ExportsPage() {
               }
             />
           ) : (
+            <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-ink-800 text-left text-[11px] uppercase tracking-wider text-ink-400">
@@ -250,6 +261,7 @@ export default async function ExportsPage() {
                 })}
               </tbody>
             </table>
+            </div>
           )}
         </Panel>
       </div>

@@ -107,11 +107,35 @@ export function checkIdentifier(kind: string, rawValue: string): CheckDigitState
  * The GTIN-14 a card would actually encode, derived from whatever GTIN the
  * product holds. Returns null when no held value normalises, which is the
  * honest answer rather than a zero-padded guess.
+ *
+ * A GTIN-14 is what an ITF-14 or a GS1 Digital Link QR carries. It is NOT what
+ * the retail symbol on the front of the card carries — see `canonicalUpcA`.
  */
 export function canonicalGtin14(values: string[]): string | null {
   for (const v of values) {
     if (!v.trim()) continue;
     const res = normaliseGtin14(v);
+    if (res.ok) return res.value.gtin;
+  }
+  return null;
+}
+
+/**
+ * The UPC-A the front of the card would encode, or null when none of the held
+ * identifiers is one.
+ *
+ * Kept separate from `canonicalGtin14` because the two answers diverge, and the
+ * difference is the whole point: a variable-measure GTIN-14 such as
+ * 90810797030462 resolves perfectly well as a GTIN-14 and cannot be a UPC-A at
+ * all, because its leading digits are an indicator, not padding. Reporting only
+ * the GTIN-14 would tell an operator a barcode is available for a card whose
+ * UPC-A element preflight is about to reject. This routine applies exactly the
+ * rule preflight applies (lib/barcode/upc.ts), so the two cannot disagree.
+ */
+export function canonicalUpcA(values: string[]): string | null {
+  for (const v of values) {
+    if (!v.trim()) continue;
+    const res = normaliseUpcA(v);
     if (res.ok) return res.value.gtin;
   }
   return null;

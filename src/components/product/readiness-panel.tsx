@@ -19,9 +19,11 @@ export function ReadinessPanel({ checks }: { checks: ReadinessCheck[] }) {
         summary.blocking === 1 ? "gap" : "gaps"
       }`
     : summary.warnings
-      ? `Ready to produce a card, with ${summary.warnings} ${
-          summary.warnings === 1 ? "gap" : "gaps"
-        } a template would leave empty`
+      ? // Not "gaps a template would leave empty": the Archived check is a
+        // warning too, and an archived product is not an empty template slot.
+        `Ready to produce a card, with ${summary.warnings} ${
+          summary.warnings === 1 ? "warning" : "warnings"
+        } to read first`
       : "Ready to produce a card";
 
   return (

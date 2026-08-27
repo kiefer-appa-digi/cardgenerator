@@ -1,6 +1,7 @@
+import { Fragment } from "react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, or } from "drizzle-orm";
 import { cardTemplates, db, exportArtifacts, exportJobs, users } from "@/server/db";
 import { assertSameOrg, requireUser } from "@/server/auth/current";
 import { PageHeader, Panel, Badge, Stat } from "@/components/ui/panel";
@@ -53,18 +54,33 @@ const SEVERITY_TONE: Record<Severity, "info" | "warning" | "danger"> = {
   blocking: "danger",
 };
 
-/** One row of the manifest written by `renderOne()` in src/server/exports.ts. */
+/**
+ * One manifest row. Two writers produce these and they do not agree on
+ * `template`: `renderOne()` in src/server/exports.ts writes the template ID,
+ * `renderBatchItem()` in src/server/batch.ts writes the template NAME. Neither
+ * is resolved by guessing — `resolveTemplate()` below looks the value up as
+ * both, and anything it cannot find is printed as plain text rather than
+ * linked to a page that would 404.
+ */
 type ManifestRow = {
   sku?: string;
   gtin?: string;
   presetCode?: string;
   template?: string;
-  revision?: number;
+  revision?: number | null;
   filename?: string;
   exportedAt?: string;
-  preflight?: { blocking?: number; error?: number; warning?: number; exportable?: boolean };
+  preflight?: {
+    blocking?: number;
+    error?: number;
+    warning?: number;
+    info?: number;
+    exportable?: boolean;
+  };
   validation?: { passed?: boolean; failed?: number } | null;
   status?: string;
+  /** Why a batch row was blocked or failed. The only account of it anywhere. */
+  note?: string;
 };
 
 /** What `exportArtifacts.validation` holds; jsonb carries no type of its own. */
@@ -113,21 +129,34 @@ export default async function ExportJobPage({ params }: PageProps<"/exports/[id]
   const manifest = (job.manifest ?? []) as ManifestRow[];
   const request = (job.request ?? {}) as { designId?: string; revisionId?: string };
 
-  // The manifest stores template ids, which are meaningless to a person.
-  const templateIds = [
+  // A manifest reference is a template id from a single export and a template
+  // name from a batch, so both are looked up and neither is assumed.
+  const templateRefs = [
     ...new Set(
       [...manifest.map((m) => m.template), job.templateId].filter(
         (v): v is string => typeof v === "string" && v.length > 0,
       ),
     ),
   ];
-  const templateRows = templateIds.length
+  const templateRows = templateRefs.length
     ? await db
         .select({ id: cardTemplates.id, name: cardTemplates.name })
         .from(cardTemplates)
-        .where(and(eq(cardTemplates.orgId, user.orgId), inArray(cardTemplates.id, templateIds)))
+        .where(
+          and(
+            eq(cardTemplates.orgId, user.orgId),
+            or(
+              inArray(cardTemplates.id, templateRefs),
+              inArray(cardTemplates.name, templateRefs),
+            ),
+          ),
+        )
     : [];
-  const templateNames = new Map(templateRows.map((t) => [t.id, t.name]));
+  const templatesById = new Map(templateRows.map((t) => [t.id, t]));
+  const templatesByName = new Map(templateRows.map((t) => [t.name, t]));
+  /** null when the template has since been deleted, or was never an id. */
+  const resolveTemplate = (ref: string | null | undefined) =>
+    ref ? (templatesById.get(ref) ?? templatesByName.get(ref) ?? null) : null;
 
   const preset = job.presetCode
     ? CARD_PRESETS[job.presetCode as CardPresetDef["code"]]
@@ -135,10 +164,17 @@ export default async function ExportJobPage({ params }: PageProps<"/exports/[id]
   const durationMs =
     job.startedAt && job.finishedAt ? job.finishedAt.getTime() - job.startedAt.getTime() : null;
 
+  const artifactViews = artifacts.map((artifact) => ({
+    artifact,
+    validation: (artifact.validation ?? {}) as ArtifactValidation,
+  }));
   const anyInvalid = artifacts.some((a) => a.status === "invalid");
+  // A proof carries no `checks` because it is never structurally validated.
+  // Counting it as "passed" would claim a measurement that never happened.
+  const checkedCount = artifactViews.filter((v) => v.validation.checks).length;
 
   const title =
-    artifacts.length === 1
+    artifacts.length === 1 && job.totalItems <= 1
       ? artifacts[0].filename
       : `${job.kind === "production" ? "Production" : job.kind === "proof" ? "Proof" : "Batch"} export`;
 
@@ -174,12 +210,18 @@ export default async function ExportJobPage({ params }: PageProps<"/exports/[id]
             <Badge tone={STATUS_TONE[job.status] ?? "neutral"}>{job.status}</Badge>
             {job.presetCode ? <Badge>{job.presetCode}</Badge> : null}
             {job.templateId ? (
-              <Link
-                href={`/templates/${job.templateId}`}
-                className="text-xs text-brand-300 hover:text-brand-200"
-              >
-                {templateNames.get(job.templateId) ?? job.templateId}
-              </Link>
+              resolveTemplate(job.templateId) ? (
+                <Link
+                  href={`/templates/${job.templateId}`}
+                  className="text-xs text-brand-300 hover:text-brand-200"
+                >
+                  {resolveTemplate(job.templateId)!.name}
+                </Link>
+              ) : (
+                <span className="text-xs text-ink-500" title="This template no longer exists">
+                  {job.templateId}
+                </span>
+              )
             ) : null}
             <span className="numeric text-xs text-ink-500">
               {author?.name || author?.email || "unknown"} · {job.createdAt.toLocaleString()}
@@ -207,14 +249,32 @@ export default async function ExportJobPage({ params }: PageProps<"/exports/[id]
           <Stat label="Files produced" value={artifacts.length} />
           <Stat
             label="Post-export checks"
-            value={artifacts.length === 0 ? "—" : anyInvalid ? "failed" : "passed"}
-            tone={artifacts.length === 0 ? "default" : anyInvalid ? "danger" : "ok"}
+            value={
+              artifacts.length === 0
+                ? "—"
+                : anyInvalid
+                  ? "failed"
+                  : checkedCount === 0
+                    ? "not run"
+                    : "passed"
+            }
+            tone={
+              artifacts.length === 0 || checkedCount === 0
+                ? "default"
+                : anyInvalid
+                  ? "danger"
+                  : "ok"
+            }
             sub={
               artifacts.length === 0
                 ? "no file to check"
                 : anyInvalid
                   ? "See the checks below"
-                  : undefined
+                  : checkedCount === 0
+                    ? job.kind === "proof"
+                      ? "A proof is not structurally validated"
+                      : "No validation was recorded"
+                    : `${checkedCount} of ${artifacts.length} file${artifacts.length === 1 ? "" : "s"} measured`
             }
           />
           <Stat
@@ -291,10 +351,15 @@ export default async function ExportJobPage({ params }: PageProps<"/exports/[id]
                   </tr>
                 </thead>
                 <tbody>
-                  {manifest.map((m, i) => (
+                  {manifest.map((m, i) => {
+                    const tpl = resolveTemplate(m.template);
+                    return (
+                    <Fragment key={`${m.filename || "row"}-${i}`}>
                     <tr
-                      key={`${m.filename ?? "row"}-${i}`}
-                      className="border-b border-ink-800/60 align-top last:border-0"
+                      className={cn(
+                        "align-top",
+                        m.note ? "" : "border-b border-ink-800/60 last:border-0",
+                      )}
                     >
                       <th scope="row" className="numeric px-4 py-2.5 text-left font-normal text-ink-100">
                         {m.sku || <span className="text-ink-600">—</span>}
@@ -306,13 +371,14 @@ export default async function ExportJobPage({ params }: PageProps<"/exports/[id]
                         {m.presetCode ? <Badge>{m.presetCode}</Badge> : "—"}
                       </td>
                       <td className="px-4 py-2.5 text-[12px] text-ink-300">
-                        {m.template ? (
-                          <Link
-                            href={`/templates/${m.template}`}
-                            className="hover:text-brand-300"
-                          >
-                            {templateNames.get(m.template) ?? m.template}
+                        {tpl ? (
+                          <Link href={`/templates/${tpl.id}`} className="hover:text-brand-300">
+                            {tpl.name}
                           </Link>
+                        ) : m.template ? (
+                          // Not linked: the template has since been deleted, so
+                          // the recorded reference is all that is left of it.
+                          <span title="This template no longer exists">{m.template}</span>
                         ) : (
                           <span className="text-ink-600">Blank card</span>
                         )}
@@ -320,7 +386,9 @@ export default async function ExportJobPage({ params }: PageProps<"/exports/[id]
                       <td className="numeric px-4 py-2.5 text-right text-ink-300">
                         {m.revision ?? "—"}
                       </td>
-                      <td className="px-4 py-2.5 text-[12px] text-ink-200">{m.filename ?? "—"}</td>
+                      <td className="px-4 py-2.5 text-[12px] text-ink-200">
+                        {m.filename || <span className="text-ink-600">no file written</span>}
+                      </td>
                       <td className="numeric px-4 py-2.5 text-[12px] text-ink-400">
                         {m.exportedAt ? new Date(m.exportedAt).toLocaleString() : "—"}
                       </td>
@@ -336,20 +404,40 @@ export default async function ExportJobPage({ params }: PageProps<"/exports/[id]
                             <span className="numeric">{m.preflight?.warning ?? 0}</span> warning
                           </Badge>
                           {m.status ? (
-                            <Badge tone={m.status === "ok" ? "ok" : "danger"}>{m.status}</Badge>
+                            <Badge tone={m.status === "ok" ? "ok" : "danger"}>
+                              {m.status.replace(/_/g, " ")}
+                            </Badge>
                           ) : null}
                         </span>
                       </td>
                     </tr>
-                  ))}
+                    {/* A batch writes the reason a row produced nothing here and
+                        nowhere else; dropping it would leave a blank line where
+                        the explanation belongs. */}
+                    {m.note ? (
+                      <tr className="border-b border-ink-800/60 last:border-0">
+                        <td colSpan={8} className="px-4 pb-2.5 pt-0">
+                          <p
+                            className={cn(
+                              "max-w-4xl text-[12px] leading-relaxed",
+                              m.status === "ok" ? "text-ink-400" : "text-flag-200",
+                            )}
+                          >
+                            {m.note}
+                          </p>
+                        </td>
+                      </tr>
+                    ) : null}
+                    </Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
           )}
         </Panel>
 
-        {artifacts.map((artifact) => {
-          const validation = (artifact.validation ?? {}) as ArtifactValidation;
+        {artifactViews.map(({ artifact, validation }) => {
           return (
             <section key={artifact.id} className="space-y-6">
               <div className="flex flex-wrap items-baseline justify-between gap-3 border-t border-ink-800 pt-6">
@@ -527,7 +615,7 @@ function PageBoxesPanel({ boxes }: { boxes: ExportPageBoxes[] | undefined }) {
   return (
     <Panel
       title="Page boxes as written"
-      description="Points, lower-left origin. TrimBox is where the cutter cuts."
+      description="Points, lower-left origin. Each box is printed as x, y, width, height — not as the [llx lly urx ury] array PDF stores it in. TrimBox is where the cutter cuts."
     >
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
@@ -540,13 +628,13 @@ function PageBoxesPanel({ boxes }: { boxes: ExportPageBoxes[] | undefined }) {
                 Side
               </th>
               <th scope="col" className="px-4 py-2 font-medium">
-                MediaBox
+                MediaBox <span className="normal-case text-ink-500">(x, y, w, h)</span>
               </th>
               <th scope="col" className="px-4 py-2 font-medium">
-                BleedBox
+                BleedBox <span className="normal-case text-ink-500">(x, y, w, h)</span>
               </th>
               <th scope="col" className="px-4 py-2 font-medium">
-                TrimBox
+                TrimBox <span className="normal-case text-ink-500">(x, y, w, h)</span>
               </th>
               <th scope="col" className="px-4 py-2 text-right font-medium">
                 Trim (in)

@@ -10,12 +10,26 @@ import { Gs1RequestLog } from "@/components/settings/gs1-request-log";
 
 export const dynamic = "force-dynamic";
 
+const SYNC_LABEL: Record<string, string> = {
+  pending: "differences awaiting review",
+  applied: "fields accepted",
+  no_changes: "nothing to accept",
+  failed: "failed",
+};
+
+const SYNC_TONE: Record<string, "neutral" | "info" | "ok" | "warning" | "danger"> = {
+  pending: "warning",
+  applied: "ok",
+  no_changes: "neutral",
+  failed: "danger",
+};
+
 export default async function Gs1SettingsPage() {
   const user = await requireCapability("gs1.read");
   const editable = can(user.role, "gs1.configure");
   const view = await gs1SettingsViewAction();
 
-  const { connection, credential, lastTest, logs } = view;
+  const { connection, credential, lastTest, logs, syncs } = view;
   const live = connection.enabled && connection.provider !== "disabled";
 
   return (
@@ -126,6 +140,70 @@ export default async function Gs1SettingsPage() {
           authMode={connection.authMode}
           editable={editable}
         />
+
+        {syncs.length > 0 ? (
+          <Panel
+            title="Verification history"
+            description="What was checked, and exactly which fields a person accepted from each answer."
+          >
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-ink-800 text-left text-[11px] uppercase tracking-wider text-ink-400">
+                    <th scope="col" className="px-4 py-2 font-medium">
+                      When
+                    </th>
+                    <th scope="col" className="px-4 py-2 font-medium">
+                      Product
+                    </th>
+                    <th scope="col" className="px-4 py-2 font-medium">
+                      GTIN
+                    </th>
+                    <th scope="col" className="px-4 py-2 font-medium">
+                      Outcome
+                    </th>
+                    <th scope="col" className="px-4 py-2 font-medium">
+                      Accepted
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {syncs.map((s) => (
+                    <tr key={s.id} className="border-b border-ink-800/60 last:border-0">
+                      <td className="numeric whitespace-nowrap px-4 py-2 text-[12px] text-ink-400">
+                        {new Date(s.createdAt).toLocaleString()}
+                      </td>
+                      <td className="px-4 py-2">
+                        <Link
+                          href={`/settings/gs1/verify?product=${s.productId}`}
+                          className="numeric text-[13px] text-ink-100 hover:text-brand-300"
+                        >
+                          {s.partNumber || s.productId.slice(0, 8)}
+                        </Link>
+                      </td>
+                      <td className="numeric px-4 py-2 text-[12px] text-ink-300">{s.gtin}</td>
+                      <td className="px-4 py-2">
+                        <Badge tone={SYNC_TONE[s.status] ?? "neutral"}>
+                          {SYNC_LABEL[s.status] ?? s.status}
+                        </Badge>
+                        {s.error ? (
+                          <div className="mt-0.5 max-w-md text-[11px] text-flag-300">{s.error}</div>
+                        ) : null}
+                      </td>
+                      <td className="px-4 py-2 text-[12px] text-ink-300">
+                        {s.acceptedFields.length === 0 ? (
+                          <span className="text-ink-600">nothing written</span>
+                        ) : (
+                          <span className="font-mono text-[11px]">{s.acceptedFields.join(", ")}</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Panel>
+        ) : null}
 
         <Gs1RequestLog rows={logs} editable={editable} />
       </div>

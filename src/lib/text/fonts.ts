@@ -70,6 +70,31 @@ export const FONT_FAMILIES: FontFamilyDef[] = [
       { weight: 700, italic: false, file: "BarlowCondensed-700.ttf", webPath: "/fonts/BarlowCondensed-700.ttf" },
     ],
   },
+  {
+    family: "Oswald",
+    label: "Oswald",
+    role: "Condensed headline and part-number face. Narrow enough for a long part number at a large size.",
+    license: "OFL-1.1",
+    fallbackCss: "'Arial Narrow', Impact, sans-serif",
+    faces: [
+      { weight: 300, italic: false, file: "Oswald-300.ttf", webPath: "/fonts/Oswald-300.ttf" },
+      { weight: 400, italic: false, file: "Oswald-400.ttf", webPath: "/fonts/Oswald-400.ttf" },
+      { weight: 500, italic: false, file: "Oswald-500.ttf", webPath: "/fonts/Oswald-500.ttf" },
+      { weight: 600, italic: false, file: "Oswald-600.ttf", webPath: "/fonts/Oswald-600.ttf" },
+      { weight: 700, italic: false, file: "Oswald-700.ttf", webPath: "/fonts/Oswald-700.ttf" },
+    ],
+  },
+  {
+    family: "Bebas Neue",
+    label: "Bebas Neue",
+    role:
+      "Display face for shelf-legible headlines. Caps only — it has no lowercase, so a text block using it is effectively uppercase whatever the case transform says.",
+    license: "OFL-1.1",
+    fallbackCss: "Impact, 'Arial Narrow Bold', sans-serif",
+    faces: [
+      { weight: 400, italic: false, file: "BebasNeue-400.ttf", webPath: "/fonts/BebasNeue-400.ttf" },
+    ],
+  },
 ];
 
 export const FONT_FAMILY_NAMES = FONT_FAMILIES.map((f) => f.family);
