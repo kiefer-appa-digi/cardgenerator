@@ -51,10 +51,17 @@ import type { Rect } from "@/lib/geometry/types";
 
 const IN = inToUpt;
 
-/** The periwinkle field from the reference, as a press recipe. */
-const FIELD_BLUE = cmykPct(52, 36, 0, 0);
-/** The blue the SKU is set in on the white tab. */
-const SKU_BLUE = cmykPct(78, 52, 0, 0);
+/**
+ * AxleTek Blue, #4A80C2, as supplied by the brand owner and converted
+ * numerically. The identity SVGs draw the mark in #4381CF instead; the supplied
+ * value wins and the difference is recorded in BRAND_SWATCHES rather than
+ * split. Replace both with vendor-specified ink values before a production run.
+ */
+const AXLETEK_BLUE = cmykPct(61.9, 34, 0, 23.9);
+/** The field the brand graphic sits on: the brand blue, lightened. */
+const FIELD_BLUE = cmykPct(46, 25, 0, 12);
+/** The blue the SKU is set in on the white tab — the brand blue itself. */
+const SKU_BLUE = AXLETEK_BLUE;
 const BLACK = cmykPct(0, 0, 0, 100);
 const PAPER = cmykPct(0, 0, 0, 0);
 

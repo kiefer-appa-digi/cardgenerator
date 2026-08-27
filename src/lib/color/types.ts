@@ -218,6 +218,25 @@ export type Swatch = {
 
 export const BRAND_SWATCHES: Swatch[] = [
   {
+    key: "axletek-blue",
+    name: "AxleTek Blue",
+    // #4A80C2, the value the brand owner supplied. The identity SVGs draw the
+    // mark in #4381CF instead — close, but not the same colour — so the supplied
+    // value is treated as authoritative and the discrepancy is recorded here
+    // rather than averaged away.
+    color: cmykPct(61.9, 34, 0, 23.9),
+    derivedFromRgb: true,
+    sourceRgbHex: "#4A80C2",
+  },
+  {
+    key: "axletek-grey",
+    name: "AxleTek Grey",
+    // The tagline grey from the supplied logo artwork.
+    color: cmykPct(0, 0, 0, 41.6),
+    derivedFromRgb: true,
+    sourceRgbHex: "#939598",
+  },
+  {
     key: "freedom-blue",
     name: "Freedom Blue",
     color: cmykPct(78, 20, 0, 0),

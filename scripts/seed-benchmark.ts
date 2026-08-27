@@ -2,11 +2,15 @@
  * Seeds the pack-contents, fitment, alternate-number, warning and origin data
  * for the 11-500 benchmark product (spec §23).
  *
- * The supplied GS1 export carries identity and identifiers only — it has no BOM,
- * fitment or compliance columns — so this content comes from the sample 11-500
- * package described in the brief. It is written as ordinary product data through
- * the same tables the importer uses, and it is clearly attributable: every row
- * created here is marked in the product's `custom.benchmarkSource`.
+ * The supplied GS1 export carries identity and identifiers only, and the
+ * Aftermarket workbook carries pack contents but no fitment, translation or
+ * compliance copy. This fills only that remaining gap, from the sample 11-500
+ * package described in the brief, and every product it touches is marked in
+ * `custom.benchmarkSource` so seeded copy is never mistaken for source data.
+ *
+ * It deliberately does NOT write pack contents any more: `npm run
+ * import:aftermarket` reads the real bill of materials, and a seeded guess
+ * sitting alongside real data is worse than no guess at all.
  */
 import { and, eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
@@ -40,13 +44,6 @@ const BENCHMARK = {
     es: { productName: "Kit de rodamientos y sellos", subtitle: "Para ejes de 3,500 lb" },
     fr: { productName: "Ensemble roulements et joints", subtitle: "Pour essieux de 1 590 kg" },
   },
-  bom: [
-    { q: "2", name: "Inner Bearing", pn: "L44643" },
-    { q: "2", name: "Outer Bearing", pn: "L68111" },
-    { q: "2", name: "Grease Seal", pn: "10-36" },
-    { q: "2", name: "Cotter Pin", pn: "CP-125" },
-    { q: "1", name: "Spindle Nut", pn: "SN-116" },
-  ],
 };
 
 const BRAND_STATEMENT =
@@ -120,27 +117,20 @@ async function main() {
   );
   await db.insert(productTranslations).values(rows);
 
-  const existingBoms = await db.select().from(boms).where(eq(boms.productId, product.id));
-  for (const b of existingBoms) await db.delete(bomItems).where(eq(bomItems.bomId, b.id));
-  await db.delete(boms).where(eq(boms.productId, product.id));
-
-  const bomId = nanoid(24);
-  await db.insert(boms).values({
-    id: bomId, orgId: org.id, productId: product.id,
-    name: "Pack contents", revision: "A", updatedAt: new Date(),
-  });
-  await db.insert(bomItems).values(
-    BENCHMARK.bom.map((it, i) => ({
-      id: nanoid(24), orgId: org.id, bomId,
-      position: i, quantity: it.q, unitOfMeasure: "EA",
-      name: it.name, partNumber: it.pn, description: "",
-    })),
-  );
+  const [bomRow] = await db.select().from(boms).where(eq(boms.productId, product.id)).limit(1);
+  const bomLines = bomRow
+    ? (await db.select().from(bomItems).where(eq(bomItems.bomId, bomRow.id))).length
+    : 0;
 
   console.log(
-    `Seeded 11-500 benchmark: ${BENCHMARK.bom.length} pack-contents lines, ` +
-      `${BENCHMARK.alternates.length} alternate numbers, ${BENCHMARK.fitments.length} fitment lines, ` +
-      `${rows.length} translation values.`,
+    `Seeded 11-500 benchmark: ${BENCHMARK.alternates.length} alternate numbers, ` +
+      `${BENCHMARK.fitments.length} fitment lines, ${rows.length} translation values, ` +
+      `country of origin and the brand statement.`,
+  );
+  console.log(
+    bomLines
+      ? `Pack contents left alone: ${bomLines} real lines from the Aftermarket workbook.`
+      : "No pack contents on this product yet — run `npm run import:aftermarket`.",
   );
 }
 

@@ -39,6 +39,18 @@ const WANTED = [
   { file: "full-white.png", role: "reversed" as const, grayscale: false, cmyk: false },
 ];
 
+/**
+ * AxleTek's own identity, supplied separately from Freedom's. The horizontal
+ * lockup comes in three colourways because a card needs all three: colour for a
+ * process front, white for artwork reversed out of a dark band, and a single
+ * grey plate for a black-and-white back.
+ */
+const AXLETEK = [
+  { file: "axletek/horizontal-colour-on-dark.png", key: "axletek-colour", grayscale: false, cmyk: false },
+  { file: "axletek/horizontal-white.png", key: "axletek-white", grayscale: false, cmyk: false },
+  { file: "axletek/horizontal-black.png", key: "axletek-black", grayscale: true, cmyk: false },
+];
+
 async function main() {
   const [org] = await db.select().from(organizations).limit(1);
   if (!org) throw new Error("No organisation. Run `npm run db:seed` first.");
@@ -122,10 +134,72 @@ async function main() {
     console.log(`uploaded ${filename} (${meta.width}×${meta.height}, ${meta.space})`);
   }
 
+  /* --------------------------------------------------------- AxleTek */
+
+  const axletekIds: Record<string, string> = {};
+  for (const a of AXLETEK) {
+    const src = path.join(BRAND_DIR, a.file);
+    if (!fs.existsSync(src)) {
+      console.warn(`missing ${src}, skipping`);
+      continue;
+    }
+    const filename = path.basename(a.file).replace(/\.png$/, a.grayscale ? "-gray.jpg" : ".png");
+    const [existing] = await db
+      .select()
+      .from(assets)
+      .where(and(eq(assets.orgId, org.id), eq(assets.filename, filename)))
+      .limit(1);
+    if (existing) {
+      axletekIds[a.key] = existing.id;
+      console.log(`asset exists: ${filename}`);
+      continue;
+    }
+    const source = fs.readFileSync(src);
+    // The reversed and colour marks keep their alpha so they can sit on a dark
+    // band; the mono one is flattened to a single grey plate.
+    const bytes = a.grayscale
+      ? new Uint8Array(
+          await sharp(source)
+            .flatten({ background: "#ffffff" })
+            .toColourspace("b-w")
+            .jpeg({ quality: 94, chromaSubsampling: "4:4:4" })
+            .toBuffer(),
+        )
+      : new Uint8Array(source);
+    const meta = await sharp(Buffer.from(bytes)).metadata();
+    const stored = await putAsset(org.id, filename, bytes, a.grayscale ? "image/jpeg" : "image/png");
+    const id = nanoid(24);
+    await db.insert(assets).values({
+      id,
+      orgId: org.id,
+      filename,
+      contentType: a.grayscale ? "image/jpeg" : "image/png",
+      byteSize: bytes.byteLength,
+      storageKey: stored.key,
+      storageUrl: stored.url,
+      pixelWidth: meta.width ?? null,
+      pixelHeight: meta.height ?? null,
+      declaredDpi: meta.density ?? null,
+      colorSpace: meta.space ?? "unknown",
+      hasAlpha: Boolean(meta.hasAlpha),
+      hasIccProfile: Boolean(meta.icc),
+      sha256: stored.sha256,
+      scanStatus: "skipped",
+      scanDetail: "Supplied AxleTek identity artwork, loaded by scripts/seed-assets.ts.",
+    });
+    axletekIds[a.key] = id;
+    console.log(`uploaded ${filename} (${meta.width}×${meta.height}, ${meta.space})`);
+  }
+
   const brandRows = await db.select().from(brands).where(eq(brands.orgId, org.id));
   for (const b of brandRows) {
-    if (!b.logoAssetId && ids.front) {
-      await db.update(brands).set({ logoAssetId: ids.front }).where(eq(brands.id, b.id));
+    // An AxleTek-family brand gets AxleTek's mark; anything else falls back to
+    // the Freedom lockup.
+    const wanted = /axle\s*tek/i.test(b.name)
+      ? (axletekIds["axletek-colour"] ?? ids.front)
+      : ids.front;
+    if (!b.logoAssetId && wanted) {
+      await db.update(brands).set({ logoAssetId: wanted }).where(eq(brands.id, b.id));
     }
   }
 
@@ -147,7 +221,18 @@ async function main() {
           // A slot whose name says "reversed" needs the white mark whichever
           // side it is on; otherwise the front takes colour and the back mono.
           const reversed = /revers/i.test(el.name) || /revers/i.test(el.id);
-          const want = reversed ? ids.reversed : side === "front" ? ids.front : ids.back;
+          // The AxleTek layout carries AxleTek's own mark, in the colourway the
+          // slot calls for; every other template keeps the Freedom lockup.
+          const axletek = /^ax-/.test(el.id);
+          const want = axletek
+            ? (reversed ? axletekIds["axletek-white"] : side === "front"
+                ? axletekIds["axletek-colour"]
+                : axletekIds["axletek-black"]) ?? (reversed ? ids.reversed : side === "front" ? ids.front : ids.back)
+            : reversed
+              ? ids.reversed
+              : side === "front"
+                ? ids.front
+                : ids.back;
           if (!want || el.assetId === want) return el;
           changed = true;
           return { ...el, assetId: want };

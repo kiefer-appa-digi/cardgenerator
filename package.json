@@ -23,7 +23,8 @@
     "seed:templates": "tsx --env-file-if-exists=.env.local scripts/seed-templates.ts",
     "samples": "tsx --env-file-if-exists=.env.local scripts/generate-samples.ts",
     "test:integration": "tsx --env-file-if-exists=.env.test vitest run --config vitest.integration.config.mts",
-    "test:all": "npm run test && npm run test:integration"
+    "test:all": "npm run test && npm run test:integration",
+    "import:aftermarket": "tsx --env-file-if-exists=.env.local scripts/import-aftermarket.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",
