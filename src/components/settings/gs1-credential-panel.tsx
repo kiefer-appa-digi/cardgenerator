@@ -89,7 +89,9 @@ export function Gs1CredentialPanel({
           </div>
           <div>
             <dt className="text-[11px] uppercase tracking-wider text-ink-500">Key version</dt>
-            <dd className="numeric mt-0.5 text-ink-200">{keyVersion}</dd>
+            {/* The column defaults to 1 on a connection row that has never held
+                a credential. Printing that would claim a first key exists. */}
+            <dd className="numeric mt-0.5 text-ink-200">{configured ? keyVersion : "—"}</dd>
           </div>
         </dl>
 

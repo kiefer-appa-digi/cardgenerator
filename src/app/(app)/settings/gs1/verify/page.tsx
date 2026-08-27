@@ -69,6 +69,10 @@ export default async function Gs1VerifyPage(props: PageProps<"/settings/gs1/veri
   }));
 
   const initialProductId = requested && list.some((p) => p.id === requested) ? requested : null;
+  // The list is sellable products only. A deep link that names a kit parent, a
+  // BOM-only component or a deleted row must say so rather than quietly opening
+  // an unselected screen and leaving the reader to wonder what happened.
+  const requestedMissing = requested !== null && initialProductId === null;
 
   return (
     <>
@@ -82,7 +86,17 @@ export default async function Gs1VerifyPage(props: PageProps<"/settings/gs1/veri
         }
       />
 
-      <div className="p-8">
+      <div className="space-y-4 p-8">
+        {requestedMissing ? (
+          <Panel>
+            <p className="px-4 py-3 text-[13px] leading-relaxed text-sev-warning">
+              That link named a product this screen cannot check. Only sellable product records
+              carry a GTIN the registry is keyed on, so kit parents, BOM-only components and
+              deleted rows are not listed. Pick one below instead.
+            </p>
+          </Panel>
+        ) : null}
+
         {list.length === 0 ? (
           <Panel>
             <div className="px-4 py-8 text-center text-sm text-ink-400">

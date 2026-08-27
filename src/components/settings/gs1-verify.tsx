@@ -141,7 +141,15 @@ export function Gs1Verify({
   return (
     <div className="space-y-6">
       <div className="grid gap-6 xl:grid-cols-[380px_1fr]">
-        <Panel title="Product" description="The local record the registry answer is compared against.">
+        {/* `min-w-0` is load-bearing: a grid item defaults to `min-width: auto`,
+            so the un-wrappable part numbers and GTINs in the list below would
+            size the column to their own width and push the whole page into a
+            horizontal scroll at any viewport narrower than the xl breakpoint. */}
+        <Panel
+          className="min-w-0"
+          title="Product"
+          description="The local record the registry answer is compared against."
+        >
           <div className="border-b border-ink-800 p-3">
             <div className="relative">
               <Search
@@ -212,7 +220,7 @@ export function Gs1Verify({
                   </Link>
                 </div>
               ) : (
-                <p className="text-sm text-ink-400">Choose a product on the left.</p>
+                <p className="text-sm text-ink-400">Choose a product from the list first.</p>
               )}
 
               <div className="grid gap-4 sm:grid-cols-[1fr_auto] sm:items-end">
@@ -220,9 +228,11 @@ export function Gs1Verify({
                   label="GTIN to check"
                   htmlFor="gtinOverride"
                   hint={
-                    selectedProduct?.gtin
-                      ? `Leave blank to use the product's recorded GTIN, ${selectedProduct.gtin}.`
-                      : "This product has no GTIN on record, so one has to be typed here."
+                    selectedProduct === null
+                      ? "Choose a product from the list first — the GTIN is checked against that product's record."
+                      : selectedProduct.gtin
+                        ? `Leave blank to use the product's recorded GTIN, ${selectedProduct.gtin}.`
+                        : "This product has no GTIN on record, so one has to be typed here."
                   }
                 >
                   <TextInput

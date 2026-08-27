@@ -87,6 +87,12 @@ export function Gs1ConnectionForm({
   const save = () => {
     setError(null);
     setSaved(false);
+    // Checked here so an emptied field produces a sentence rather than the
+    // schema's "expected number to be >=1000" after a round trip.
+    if (!Number.isInteger(draft.timeoutMs) || draft.timeoutMs < 1_000 || draft.timeoutMs > 60_000) {
+      setError("The timeout must be a whole number of milliseconds between 1000 and 60000.");
+      return;
+    }
     start(async () => {
       const res = await saveGs1ConnectionAction({
         provider: draft.provider,

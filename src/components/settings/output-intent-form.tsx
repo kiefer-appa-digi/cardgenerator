@@ -33,9 +33,18 @@ export type OutputIntentView = {
 
 export function OutputIntentForm({
   initial,
+  configured,
   editable,
 }: {
   initial: OutputIntentView;
+  /**
+   * Whether an ICC profile is actually embedded. Kept separate from
+   * `initial.profile`, which carries the *upload* record: a profile written
+   * before that record existed, or by a migration, is still embedded and must
+   * still be removable. Hiding the control because the paperwork is missing
+   * would strand a profile nobody can take out.
+   */
+  configured: boolean;
   editable: boolean;
 }) {
   const router = useRouter();
@@ -144,7 +153,7 @@ export function OutputIntentForm({
             >
               <Upload size={20} className="mb-2 text-ink-400" aria-hidden />
               <span className="text-sm font-medium text-ink-100">
-                {filename ?? (initial.profile ? "Replace the ICC profile" : "Choose an .icc or .icm profile")}
+                {filename ?? (configured ? "Replace the ICC profile" : "Choose an .icc or .icm profile")}
               </span>
               <span className="mt-1 text-[11px] text-ink-500">
                 CMYK, RGB or grayscale. The header is checked: a truncated or fake
@@ -161,15 +170,23 @@ export function OutputIntentForm({
             </label>
           ) : null}
 
-          {initial.profile ? (
+          {configured ? (
             <div className="flex flex-wrap items-center justify-between gap-3 rounded border border-ink-800 bg-ink-900/60 px-3 py-2.5">
               <div className="min-w-0">
-                <div className="truncate text-[13px] text-ink-100">{initial.profile.filename}</div>
+                <div className="truncate text-[13px] text-ink-100">
+                  {initial.profile ? initial.profile.filename : "An ICC profile is embedded"}
+                </div>
                 <div className="numeric mt-0.5 text-[11px] text-ink-500">
-                  {initial.profile.colorSpace} · {initial.profile.componentCount} channels ·{" "}
-                  {(initial.profile.byteSize / 1024).toFixed(0)} KB · uploaded{" "}
-                  {new Date(initial.profile.updatedAt).toLocaleDateString()} by{" "}
-                  {initial.profile.updatedBy}
+                  {initial.profile ? (
+                    <>
+                      {initial.profile.colorSpace} · {initial.profile.componentCount} channels ·{" "}
+                      {(initial.profile.byteSize / 1024).toFixed(0)} KB · uploaded{" "}
+                      {new Date(initial.profile.updatedAt).toLocaleDateString()} by{" "}
+                      {initial.profile.updatedBy}
+                    </>
+                  ) : (
+                    "No upload record was kept for it, so its filename, size and colour space are not known here. Replace it to record those."
+                  )}
                 </div>
               </div>
               {editable ? (

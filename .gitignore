@@ -54,3 +54,4 @@ next-env.d.ts
 /artifacts/screens/
 /artifacts/renders/
 /artifacts/state.json
+.env.test

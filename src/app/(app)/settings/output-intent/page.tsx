@@ -97,7 +97,7 @@ export default async function OutputIntentPage() {
           </div>
         </Panel>
 
-        <OutputIntentForm initial={view} editable={editable} />
+        <OutputIntentForm initial={view} configured={configured} editable={editable} />
 
         <Panel title="Related">
           <div className="px-4 py-3 text-[12px] leading-relaxed text-ink-400">
