@@ -14,6 +14,13 @@ const nextConfig: NextConfig = {
     "/exports/**": ["./src/assets/fonts/**"],
   },
   serverExternalPackages: ["sharp", "exceljs"],
+  experimental: {
+    // Self-hosted and local runs post source workbooks straight to a Server
+    // Action. On Vercel the platform caps a function's request body well below
+    // this, which is why large files go direct to Blob instead — see
+    // src/app/api/blob/upload/route.ts.
+    serverActions: { bodySizeLimit: "45mb" },
+  },
 };
 
 export default nextConfig;

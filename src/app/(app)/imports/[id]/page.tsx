@@ -5,6 +5,8 @@ import { assertSameOrg, requireUser } from "@/server/auth/current";
 import { can } from "@/server/auth/rbac";
 import { PageHeader } from "@/components/ui/panel";
 import { ImportWizard } from "@/components/import/wizard";
+import { AftermarketReview } from "@/components/import/aftermarket-review";
+import type { AftermarketPreview } from "@/server/aftermarket-import";
 import { SheetMappingSchema } from "@/lib/import/types";
 import { TARGET_FIELDS } from "@/lib/import/mapping";
 
@@ -19,6 +21,29 @@ export default async function ImportDetailPage({ params }: PageProps<"/imports/[
 
   const mapping = SheetMappingSchema.safeParse(row.mapping);
   const stash = row.preview as { headers?: string[]; report?: unknown } | null;
+
+  // The Aftermarket workbook has its own reader and its own review screen; the
+  // column-mapping wizard cannot express a block-structured BOM.
+  const profileId = (row.mapping as { profileId?: string } | null)?.profileId;
+  if (profileId === "aftermarket-rev-b") {
+    return (
+      <>
+        <PageHeader
+          title={row.filename}
+          description={`Aftermarket BOM workbook · ${row.rowsTotal} kits · ${row.status}`}
+        />
+        <div className="p-8">
+          <AftermarketReview
+            importId={row.id}
+            status={row.status}
+            preview={(row.preview as AftermarketPreview | null) ?? null}
+            report={row.report as Record<string, unknown>}
+            canCommit={can(user.role, "product.import")}
+          />
+        </div>
+      </>
+    );
+  }
 
   return (
     <>

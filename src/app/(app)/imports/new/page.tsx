@@ -3,7 +3,7 @@ import { UploadForm } from "./upload-form";
 import { requireCapability } from "@/server/auth/current";
 
 export default async function NewImportPage() {
-  await requireCapability("product.import");
+  const user = await requireCapability("product.import");
   return (
     <>
       <PageHeader
@@ -13,7 +13,7 @@ export default async function NewImportPage() {
       <div className="p-8">
         <div className="max-w-2xl space-y-6">
           <Panel title="Workbook">
-            <UploadForm />
+            <UploadForm orgId={user.orgId} />
           </Panel>
           <Panel title="What happens next">
             <ol className="space-y-3 px-4 py-4 text-sm leading-relaxed text-ink-300">
